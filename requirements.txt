@@ -1,0 +1,27 @@
+# Core Dependencies
+moviepy==1.0.3
+pillow==10.0.0
+numpy==1.24.0
+
+# AI & Language Services
+groq==0.9.0
+google-auth-oauthlib==1.2.0
+google-auth-httplib2==0.2.0
+google-api-python-client==2.108.0
+
+# Web & Video Download
+yt-dlp==2024.1.1
+requests==2.31.0
+beautifulsoup4==4.12.0
+
+# Bot & Automation
+pyTelegramBotAPI==4.15.0
+selenium==4.15.2
+webdriver-manager==4.0.1
+
+# Utils
+python-dotenv==1.0.0
+
+# Optional: For better performance
+aiohttp==3.9.0
+asyncio==3.4.3
