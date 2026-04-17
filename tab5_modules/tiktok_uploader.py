@@ -52,6 +52,44 @@ class TikTokUploader:
                 self.log(f"⚠️ Phát hiện driver session mất: {e}")
             return False
 
+    def wait_page_load(self, timeout=10):
+        """Chờ page load hoàn thành"""
+        try:
+            WebDriverWait(self.driver, timeout).until(
+                lambda driver: driver.execute_script("return document.readyState") == "complete"
+            )
+            return True
+        except:
+            return False
+
+    def safe_find_element(self, xpath, timeout=10, retries=2):
+        """
+        Tìm element với retry logic
+        Nếu session bị mất sẽ tự động khôi phục
+        """
+        for attempt in range(retries):
+            try:
+                element = WebDriverWait(self.driver, timeout).until(
+                    EC.presence_of_element_located((By.XPATH, xpath))
+                )
+                return element
+            except Exception as e:
+                if "invalid session id" in str(e).lower() and attempt < retries - 1:
+                    self.log(f"⚠️ Session bị mất (attempt {attempt+1}/{retries}), khôi phục...")
+                    self.close()
+                    self.init_driver(headless=False)
+                    time.sleep(1)
+                    
+                    if self.load_cookies() and self.is_already_logged_in():
+                        self.log("✅ Đã khôi phục session, thử lại...")
+                        time.sleep(1)
+                        continue
+                    else:
+                        raise Exception("Không thể khôi phục session")
+                else:
+                    raise
+        return None
+
     def init_driver(self, headless=False):
         """Khởi tạo Selenium Chrome driver với persistent profile"""
         try:
@@ -235,9 +273,21 @@ class TikTokUploader:
 
             # === BƯỚC 1: Upload file ===
             self.log("1️⃣ Chọn file video...")
-            file_input = WebDriverWait(self.driver, 20).until(
-                EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
-            )
+            
+            # Đảm bảo navigate đến upload page
+            try:
+                self.driver.get("https://www.tiktok.com/upload")
+                self.wait_page_load(timeout=10)
+            except:
+                pass  # Tiếp tục nếu không navigate được
+            
+            time.sleep(2)
+            
+            file_input = self.safe_find_element("//input[@type='file']", timeout=20, retries=2)
+            if not file_input:
+                self.log("❌ Không tìm thấy input file")
+                return False
+                
             file_input.send_keys(os.path.abspath(video_path))
             self.log("✅ File đã chọn")
 
