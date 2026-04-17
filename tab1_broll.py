@@ -11,6 +11,7 @@ from PIL import Image, ImageTk
 # Gọi 2 thằng đệ ra làm việc
 from tab1_modules.thumbnail_maker import ThumbnailHandler
 from tab1_modules.ai_vision import AIVisionHandler
+from tab2_modules.ai_services import get_transcription
 
 class BRollTab:
     def __init__(self, parent, main_app):
@@ -388,6 +389,8 @@ class BRollTab:
             p_data = self.main_app.get_project_data(self.current_project_id)
             if "voice_usage" not in p_data: 
                 p_data["voice_usage"] = {}
+            if "voice_srt_cache" not in p_data:  # [MỚI] Khởi tạo SRT cache
+                p_data["voice_srt_cache"] = {}
                 
             for f in files: 
                 file_name = os.path.basename(f)
@@ -399,8 +402,72 @@ class BRollTab:
             
             # 2. Lưu lại (Hàm save này cũng tự có khóa bảo vệ bên main.py rồi, gọi thẳng tay!)
             self.main_app.save_project_data(self.current_project_id, p_data)
+            
+            # 3. [MỚI] Bắt đầu extract SRT cho từng voice mới (chạy background)
+            for f in files:
+                file_name = os.path.basename(f)
+                file_path = os.path.join(voice_dir, file_name)
+                thread = threading.Thread(target=self._extract_voice_srt_async, args=(file_name, file_path), daemon=True)
+                thread.start()
                 
             self.load_voices()
+    
+    def _extract_voice_srt_async(self, voice_name, voice_path):
+        """[MỚI] Bóc SRT từ voice file và lưu vào cache (chạy background)"""
+        try:
+            # Gọi get_transcription từ Tab 2
+            mode = self.main_app.config.get("boc_bang_mode", "groq")
+            srt_text = get_transcription(voice_path, voice_name, mode, self.main_app.config, self._log_extract)
+            
+            # Lưu vào cache
+            p_data = self.main_app.get_project_data(self.current_project_id)
+            if "voice_srt_cache" not in p_data:
+                p_data["voice_srt_cache"] = {}
+            
+            p_data["voice_srt_cache"][voice_name] = srt_text
+            self.main_app.save_project_data(self.current_project_id, p_data)
+            
+            self._log_extract(f"✅ Đã bóp SRT xong: {voice_name}")
+        except Exception as e:
+            self._log_extract(f"❌ Lỗi bóc SRT {voice_name}: {str(e)}")
+    
+    def _log_extract(self, msg):
+        """[MỚI] Ghi log extraction (để in ra log nếu có)"""
+        print(f"[Tab 1 Voice] {msg}")
+    
+    def get_voice_srt(self, voice_name):
+        """[MỚI] Lấy SRT của voice (từ cache)"""
+        p_data = self.main_app.get_project_data(self.current_project_id)
+        
+        # Check xem có cache không
+        if "voice_srt_cache" in p_data and voice_name in p_data["voice_srt_cache"]:
+            return p_data["voice_srt_cache"][voice_name]
+        
+        return None
+    
+    def get_voice_srt_or_extract(self, project_id, voice_name, voice_path):
+        """[MỚI] Lấy SRT từ cache, nếu chưa có thì extract (blocking)"""
+        p_data = self.main_app.get_project_data(project_id)
+        
+        # 1. Check cache trước
+        if "voice_srt_cache" in p_data and voice_name in p_data["voice_srt_cache"]:
+            return p_data["voice_srt_cache"][voice_name]
+        
+        # 2. Nếu chưa cache, extract ngay (blocking call)
+        try:
+            mode = self.main_app.config.get("boc_bang_mode", "groq")
+            srt_text = get_transcription(voice_path, voice_name, mode, self.main_app.config, self._log_extract)
+            
+            # Lưu vào cache
+            if "voice_srt_cache" not in p_data:
+                p_data["voice_srt_cache"] = {}
+            p_data["voice_srt_cache"][voice_name] = srt_text
+            self.main_app.save_project_data(project_id, p_data)
+            
+            return srt_text
+        except Exception as e:
+            self._log_extract(f"❌ Lỗi bóc SRT {voice_name}: {str(e)}")
+            raise
             
     def add_project_dialog(self):
         proj_name = simpledialog.askstring("Tên Project", "Nhập tên Project:")

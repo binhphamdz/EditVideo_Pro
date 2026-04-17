@@ -380,10 +380,17 @@ class FacelessTab:
             voice_path = os.path.join(proj_dir, "Voices", voice_name)
             out_file = os.path.join(GLOBAL_OUT_DIR, f"[{proj_name}] {os.path.splitext(voice_name)[0]}_{datetime.now().strftime('%H%M%S')}.mp4")
             
-            # 1. Bóc băng
-            voice_text = get_transcription(voice_path, voice_name, self.main_app.config.get("boc_bang_mode", "groq"), self.main_app.config, self.add_log)
-            
             pid = self.pid_map[proj_name]
+            
+            # 1. Bóc băng [CẬP NHẬT] Dùng cache từ Tab 1 nếu có sẵn
+            try:
+                # [MỚI] Cố gắng dùng cache từ Tab 1
+                voice_text = self.main_app.tab1.get_voice_srt_or_extract(pid, voice_name, voice_path)
+                self.add_log(f"[{voice_name}] ✅ Dùng SRT (cache hoặc extract mới)")
+            except Exception as e:
+                # Fallback: Nếu Tab 1 không có, extract trực tiếp
+                self.add_log(f"[{voice_name}] ⚠️ Fallback extract: {str(e)[:50]}")
+                voice_text = get_transcription(voice_path, voice_name, self.main_app.config.get("boc_bang_mode", "groq"), self.main_app.config, self.add_log)
             
             # =======================================================
             # [Ổ KHÓA SỐ 1] Ghi trí nhớ điểm Broll
