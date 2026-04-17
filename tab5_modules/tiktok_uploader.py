@@ -39,6 +39,19 @@ class TikTokUploader:
         ts = datetime.now().strftime("%H:%M:%S")
         self.callback_log(f"[{ts}] {msg}")
 
+    def is_driver_alive(self):
+        """Kiểm tra xem driver session còn sống không"""
+        try:
+            if self.driver is None:
+                return False
+            # Thử gọi get_window_size - nếu session mất sẽ throw exception
+            self.driver.get_window_size()
+            return True
+        except Exception as e:
+            if "invalid session id" in str(e).lower():
+                self.log(f"⚠️ Phát hiện driver session mất: {e}")
+            return False
+
     def init_driver(self, headless=False):
         """Khởi tạo Selenium Chrome driver với persistent profile"""
         try:
@@ -196,6 +209,26 @@ class TikTokUploader:
             return False
 
         try:
+            # === KIỂM TRA DRIVER SESSION ===
+            if not self.is_driver_alive():
+                self.log("⚠️ Driver session bị mất, khôi phục lại...")
+                self.close()
+                self.init_driver(headless=False)
+                time.sleep(2)
+                
+                # Load cookies để tân tạo session
+                if not self.load_cookies():
+                    self.log("❌ Không thể tân tạo session")
+                    return False
+                    
+                # Kiểm tra login lại
+                if not self.is_already_logged_in():
+                    self.log("❌ Không thể khôi phục login session")
+                    return False
+                    
+                self.log("✅ Đã khôi phục driver session")
+                time.sleep(2)
+            
             self.uploading = True
             video_name = os.path.basename(video_path)
             self.log(f"🚀 Bắt đầu upload: {video_name}")
@@ -301,8 +334,11 @@ class TikTokUploader:
         finally:
             self.uploading = False
             # Reload để upload video tiếp theo
-            time.sleep(3)
-            self.driver.get("https://www.tiktok.com/upload")
+            time.sleep(2)
+            try:
+                self.driver.get("https://www.tiktok.com/upload")
+            except:
+                self.log("⚠️ Không thể reload upload form")
 
     def upload_batch(self, video_files, title_template="", description_template="", hashtags="", delay_seconds=180):
         """
