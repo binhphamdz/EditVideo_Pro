@@ -524,21 +524,38 @@ class AutoPostTab:
                     time.sleep(1)
                     continue
 
-                remote_video_name = os.path.basename(video_path)
-                remote_video_path = self._join_remote_path(remote_dir, remote_video_name)
+                # =========================================================
+                # [FIX BẮT ĐẦU TỪ ĐÂY] - Trị dứt điểm bệnh ADB kén Tiếng Việt
+                # =========================================================
+                import tempfile
+                
+                # Tạo tên file thuần tiếng Anh không dấu để ADB không bị "ngáo"
+                file_ext = os.path.splitext(video_path)[1] or ".mp4"
+                safe_remote_name = f"auto_shopee_{int(time.time())}{file_ext}"
+                remote_video_path = self._join_remote_path(remote_dir, safe_remote_name)
+                
                 upd_status(f"🧹 Dọn thư mục video rồi đẩy {video_name} vào máy...")
                 self._clear_remote_videos(adb_cmd, device_id, creationflags, remote_dir=remote_dir, clear_all_dirs=False)
                 subprocess.run([adb_cmd, "-s", device_id, "shell", "mkdir", "-p", remote_dir], creationflags=creationflags)
 
                 push_ok = False
+                temp_local_path = ""
                 try:
+                    # 1. Copy file ra thư mục Temp của máy tính
+                    temp_local_path = os.path.join(tempfile.gettempdir(), safe_remote_name)
+                    shutil.copy2(video_path, temp_local_path)
+                    
+                    # 2. Push file Temp (tên an toàn) lên điện thoại
                     result = subprocess.run(
-                        [adb_cmd, "-s", device_id, "push", video_path, remote_dir],
+                        [adb_cmd, "-s", device_id, "push", temp_local_path, remote_video_path],
                         capture_output=True,
                         text=True,
+                        encoding="utf-8",
+                        errors="ignore", # Chống văng app nếu ADB nhả log ký tự lạ
                         timeout=120,
                         creationflags=creationflags,
                     )
+                    
                     if result.returncode == 0:
                         self._broadcast_media_scan(adb_cmd, device_id, remote_video_path, creationflags)
                         time.sleep(2)
@@ -546,8 +563,19 @@ class AutoPostTab:
                     else:
                         push_error = (result.stderr or result.stdout or "adb push thất bại").strip()
                         upd_status(f"❌ Push lỗi: {push_error[:60]}")
+                        
                 except subprocess.TimeoutExpired:
                     upd_status("❌ Đẩy file quá lâu, bỏ job này.")
+                except Exception as e:
+                    upd_status(f"❌ Lỗi copy/đẩy file: {str(e)[:40]}")
+                finally:
+                    # 3. Quét dọn file Temp trên máy tính để không tốn ổ C
+                    if temp_local_path and os.path.exists(temp_local_path):
+                        try: os.remove(temp_local_path)
+                        except: pass
+                # =========================================================
+                # [FIX KẾT THÚC Ở ĐÂY]
+                # =========================================================
 
                 if not push_ok:
                     retry_count = self._increment_job_retry(device_id, video_name)
