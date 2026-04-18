@@ -1,6 +1,5 @@
 import os
 import random
-import shutil
 import subprocess
 import threading
 import time
@@ -11,7 +10,6 @@ import cv2
 
 from paths import BASE_PATH
 from shopee_export import (
-    POSTED_VIDEO_DIR,
     VIDEO_OUTPUT_DIR,
     claim_next_shopee_job,
     get_shopee_csv_path,
@@ -537,14 +535,11 @@ class AutoPostTab:
                 # =========================================================
                 # [TUYỆT CHIÊU CUỐI: ÉP THỜI GIAN TRỰC TIẾP TRÊN ANDROID]
                 # =========================================================
-                import time
-
                 file_ext = os.path.splitext(video_path)[1] or ".mp4"
                 safe_name = f"auto_shopee_{int(time.time())}{file_ext}"
                 temp_remote = f"/sdcard/{safe_name}"
-                
-                # Sửa lỗi chéo dấu gạch chéo
-                final_remote = f"{remote_dir}{safe_name}" if remote_dir.endswith("/") else f"{remote_dir}/{safe_name}"
+
+                remote_video_path = self._join_remote_path(remote_dir, safe_name)
 
                 upd_status(f"🧹 Dọn video cũ rồi đẩy {video_name} vào máy...")
                 self._clear_remote_videos(adb_cmd, device_id, creationflags, remote_dir=remote_dir, clear_all_dirs=False)
@@ -559,17 +554,22 @@ class AutoPostTab:
                     )
 
                     if result.returncode == 0:
-                        # 2. Bắt hệ điều hành Android tự Copy file để lấy mốc thời gian NGAY BÂY GIỜ
-                        subprocess.run([adb_cmd, "-s", device_id, "shell", "cp", temp_remote, final_remote], creationflags=creationflags)
-
-                        # 3. Xóa file mồi
-                        subprocess.run([adb_cmd, "-s", device_id, "shell", "rm", temp_remote], creationflags=creationflags)
-
-                        # 4. Ép Thư viện ảnh Shopee phải nôn file ra bằng Broadcast
-                        subprocess.run([adb_cmd, "-s", device_id, "shell", "am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", f"file://{final_remote}"], creationflags=creationflags)
-
-                        time.sleep(2)
-                        push_ok = True
+                        copy_result = subprocess.run(
+                            [adb_cmd, "-s", device_id, "shell", "cp", temp_remote, remote_video_path],
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="ignore",
+                            timeout=30,
+                            creationflags=creationflags,
+                        )
+                        if copy_result.returncode == 0:
+                            self._broadcast_media_scan(adb_cmd, device_id, remote_video_path, creationflags)
+                            time.sleep(2)
+                            push_ok = True
+                        else:
+                            copy_error = (copy_result.stderr or copy_result.stdout or "android cp thất bại").strip()
+                            upd_status(f"❌ Copy nội bộ lỗi: {copy_error[:60]}")
                     else:
                         push_error = (result.stderr or result.stdout or "adb push thất bại").strip()
                         upd_status(f"❌ Push lỗi: {push_error[:60]}")
@@ -578,6 +578,12 @@ class AutoPostTab:
                     upd_status("❌ Đẩy file quá lâu, bỏ job này.")
                 except Exception as e:
                     upd_status(f"❌ Lỗi đẩy file: {str(e)[:40]}")
+                finally:
+                    subprocess.run(
+                        [adb_cmd, "-s", device_id, "shell", "rm", "-f", temp_remote],
+                        creationflags=creationflags,
+                        check=False,
+                    )
                 # =========================================================
 
                 if not push_ok:
@@ -638,23 +644,8 @@ class AutoPostTab:
 
                 update_job_status(video_name, "Đã đăng ✅")
                 self._clear_job_retry(device_id, video_name)
-                
-                # =========================================================
-                # [GIỮ NGUYÊN VIDEO TRÊN PC SAU KHI ĐĂNG THÀNH CÔNG]
-                # =========================================================
-                upd_status("✅ Đăng xong, giữ nguyên video gốc trên máy tính...")
-                
-                # Chỉ xóa video rác trên điện thoại để máy ko bị đầy dung lượng
-                self._cleanup_remote_file(adb_cmd, device_id, remote_video_path, creationflags)
-                current_job = None
-                # =========================================================
 
-                os.makedirs(POSTED_VIDEO_DIR, exist_ok=True)
-                if os.path.exists(video_path):
-                    try:
-                        shutil.move(video_path, os.path.join(POSTED_VIDEO_DIR, video_name))
-                    except Exception:
-                        pass
+                upd_status("✅ Đăng xong, giữ nguyên video gốc trên máy tính...")
                 self._cleanup_remote_file(adb_cmd, device_id, remote_video_path, creationflags)
                 current_job = None
 
@@ -1072,21 +1063,8 @@ class AutoPostTab:
                 self.manual_push_video(video_name)
 
     def manual_push_video(self, video_name):
-        # 1. TÌM ĐƯỜNG DẪN CỦA VIDEO TRÊN MÁY TÍNH (WINDOWS)
-        video_path = ""
-        
-        # Ưu tiên bới trong danh sách công việc (jobs) đang hiện trên bảng
-        if hasattr(self, "jobs"):
-            for job in self.jobs:
-                if job.get("video_name") == video_name:
-                    video_path = job.get("video_path", "")
-                    break
-                    
-        # Nếu vẫn chưa thấy, tự động dò ở thư mục xuất video mặc định của Tool
-        if not video_path or not os.path.exists(video_path):
-            video_path = os.path.join(os.getcwd(), "Workspace_Data", "Shopee_Export", video_name)
-            
-        # Kiểm tra lần cuối, nếu máy tính thực sự không có file này thì báo lỗi chuẩn chỉ
+        video_path = resolve_shopee_video_path(video_name)
+
         if not os.path.exists(video_path):
             messagebox.showerror("Lỗi", f"Không tìm thấy file trên MÁY TÍNH!\nĐang tìm tại:\n{video_path}\n\n(Lưu ý: Chỉ đăng file Video .mp4, không đăng file âm thanh .MP3 sếp nhé!)")
             return
@@ -1124,21 +1102,26 @@ class AutoPostTab:
                     result = subprocess.run([adb_cmd, "-s", device_id, "push", video_path, temp_remote], capture_output=True, text=True, errors="ignore", timeout=60, creationflags=creationflags)
                     
                     if result.returncode == 0:
-                        # 2. [TUYỆT CHIÊU] Dùng lệnh Copy của Android để tạo file mới tinh 100%
-                        subprocess.run([adb_cmd, "-s", device_id, "shell", "cp", temp_remote, final_remote], creationflags=creationflags)
-                        
-                        # 3. Xóa file rác ở rìa
-                        subprocess.run([adb_cmd, "-s", device_id, "shell", "rm", temp_remote], creationflags=creationflags)
-                        
-                        # 4. Tát Media Scanner bắt nó ghi nhận ngay lập tức
-                        subprocess.run([adb_cmd, "-s", device_id, "shell", "am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", f"file://{final_remote}"], creationflags=creationflags)
-                        
-                        self.parent.after(0, lambda d=device_id: self.main_app.tab5.update_device_farm_status(d, f"✅ Bắn tay xong: {video_name}"))
+                        copy_result = subprocess.run(
+                            [adb_cmd, "-s", device_id, "shell", "cp", temp_remote, final_remote],
+                            capture_output=True,
+                            text=True,
+                            errors="ignore",
+                            timeout=30,
+                            creationflags=creationflags,
+                        )
+                        if copy_result.returncode == 0:
+                            self._broadcast_media_scan(adb_cmd, device_id, final_remote, creationflags)
+                            self.parent.after(0, lambda d=device_id: self.main_app.tab5.update_device_farm_status(d, f"✅ Bắn tay xong: {video_name}"))
+                        else:
+                            self.parent.after(0, lambda d=device_id: self.main_app.tab5.update_device_farm_status(d, "❌ Copy nội bộ thất bại."))
                     else:
                         self.parent.after(0, lambda d=device_id: self.main_app.tab5.update_device_farm_status(d, "❌ Bắn tay thất bại."))
                         
                 except Exception as e:
                     print(f"Lỗi bắn tay: {e}")
+                finally:
+                    subprocess.run([adb_cmd, "-s", device_id, "shell", "rm", "-f", temp_remote], creationflags=creationflags, check=False)
 
             self.parent.after(0, lambda: messagebox.showinfo("Hoàn tất", f"Đã bắn xong video vào {len(selected_devices)} máy!\nMở Shopee lên là thấy ngay!"))
             
