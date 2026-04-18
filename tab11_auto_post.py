@@ -525,11 +525,11 @@ class AutoPostTab:
                     continue
 
                 # =========================================================
-                # [FIX BẮT ĐẦU TỪ ĐÂY] - Trị dứt điểm bệnh ADB kén Tiếng Việt
+                # [FIX BỆNH KÉN TÊN FILE & HACK THỜI GIAN LÊN TOP 1 SHOPEE]
                 # =========================================================
                 import tempfile
                 
-                # Tạo tên file thuần tiếng Anh không dấu để ADB không bị "ngáo"
+                # Tạo tên file thuần tiếng Anh không dấu
                 file_ext = os.path.splitext(video_path)[1] or ".mp4"
                 safe_remote_name = f"auto_shopee_{int(time.time())}{file_ext}"
                 remote_video_path = self._join_remote_path(remote_dir, safe_remote_name)
@@ -541,22 +541,29 @@ class AutoPostTab:
                 push_ok = False
                 temp_local_path = ""
                 try:
-                    # 1. Copy file ra thư mục Temp của máy tính
+                    # 1. Copy file ra Temp với tên an toàn
                     temp_local_path = os.path.join(tempfile.gettempdir(), safe_remote_name)
                     shutil.copy2(video_path, temp_local_path)
                     
-                    # 2. Push file Temp (tên an toàn) lên điện thoại
+                    # 2. Push file lên điện thoại
                     result = subprocess.run(
                         [adb_cmd, "-s", device_id, "push", temp_local_path, remote_video_path],
                         capture_output=True,
                         text=True,
                         encoding="utf-8",
-                        errors="ignore", # Chống văng app nếu ADB nhả log ký tự lạ
+                        errors="ignore",
                         timeout=120,
                         creationflags=creationflags,
                     )
                     
                     if result.returncode == 0:
+                        # 3. [TUYỆT CHIÊU] Hack thời gian file thành HIỆN TẠI để xếp Top 1 Thư viện
+                        subprocess.run(
+                            [adb_cmd, "-s", device_id, "shell", "touch", remote_video_path],
+                            creationflags=creationflags
+                        )
+                        
+                        # 4. Quét media để Android nhận diện file ngay lập tức
                         self._broadcast_media_scan(adb_cmd, device_id, remote_video_path, creationflags)
                         time.sleep(2)
                         push_ok = True
@@ -569,12 +576,10 @@ class AutoPostTab:
                 except Exception as e:
                     upd_status(f"❌ Lỗi copy/đẩy file: {str(e)[:40]}")
                 finally:
-                    # 3. Quét dọn file Temp trên máy tính để không tốn ổ C
+                    # 5. Dọn rác thư mục Temp trên PC
                     if temp_local_path and os.path.exists(temp_local_path):
                         try: os.remove(temp_local_path)
                         except: pass
-                # =========================================================
-                # [FIX KẾT THÚC Ở ĐÂY]
                 # =========================================================
 
                 if not push_ok:
@@ -635,7 +640,20 @@ class AutoPostTab:
 
                 update_job_status(video_name, "Đã đăng ✅")
                 self._clear_job_retry(device_id, video_name)
-                upd_status("✅ Đăng xong, đang dọn file...")
+                # =========================================================
+                # [XÓA VIDEO TRÊN PC SAU KHI ĐĂNG THÀNH CÔNG]
+                # =========================================================
+                upd_status("✅ Đăng xong, đang XÓA file gốc trên máy tính...")
+                if os.path.exists(video_path):
+                    try:
+                        os.remove(video_path) # Cho bay màu file luôn
+                    except Exception as e:
+                        print(f"Lỗi xóa file: {e}")
+                        
+                self._cleanup_remote_file(adb_cmd, device_id, remote_video_path, creationflags)
+                current_job = None
+                # =========================================================
+
                 os.makedirs(POSTED_VIDEO_DIR, exist_ok=True)
                 if os.path.exists(video_path):
                     try:
