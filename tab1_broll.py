@@ -228,8 +228,9 @@ class BRollTab:
         self.scroll_act = ttk.Scrollbar(self.tab_active, orient="vertical", command=self.canvas_act.yview)
         self.frame_act = tk.Frame(self.canvas_act, bg="#fdfefe")
         self.frame_act.bind("<Configure>", lambda e: self.canvas_act.configure(scrollregion=self.canvas_act.bbox("all")))
-        self.canvas_act.create_window((0, 0), window=self.frame_act, anchor="nw")
+        self.frame_act_window = self.canvas_act.create_window((0, 0), window=self.frame_act, anchor="nw")
         self.canvas_act.configure(yscrollcommand=self.scroll_act.set)
+        self.canvas_act.bind("<Configure>", self._sync_canvas_window_widths)
         self.canvas_act.pack(side="left", fill="both", expand=True)
         self.scroll_act.pack(side="right", fill="y")
 
@@ -238,8 +239,9 @@ class BRollTab:
         self.scroll_tr = ttk.Scrollbar(self.tab_trash, orient="vertical", command=self.canvas_tr.yview)
         self.frame_tr = tk.Frame(self.canvas_tr, bg="#fdfefe")
         self.frame_tr.bind("<Configure>", lambda e: self.canvas_tr.configure(scrollregion=self.canvas_tr.bbox("all")))
-        self.canvas_tr.create_window((0, 0), window=self.frame_tr, anchor="nw")
+        self.frame_tr_window = self.canvas_tr.create_window((0, 0), window=self.frame_tr, anchor="nw")
         self.canvas_tr.configure(yscrollcommand=self.scroll_tr.set)
+        self.canvas_tr.bind("<Configure>", self._sync_canvas_window_widths)
         self.canvas_tr.pack(side="left", fill="both", expand=True)
         self.scroll_tr.pack(side="right", fill="y")
 
@@ -346,6 +348,13 @@ class BRollTab:
         for child in parent_widget.winfo_children():
             # Gọi đệ quy để đi sâu vào các lớp bên trong (Frame lồng Frame)
             self._bind_mousewheel_to_all_children(child)
+
+    def _sync_canvas_window_widths(self, event=None):
+        try:
+            self.canvas_act.itemconfigure(self.frame_act_window, width=self.canvas_act.winfo_width())
+            self.canvas_tr.itemconfigure(self.frame_tr_window, width=self.canvas_tr.winfo_width())
+        except Exception:
+            pass
 
 
     def refresh_project_list(self):
@@ -675,6 +684,10 @@ class BRollTab:
         self.desc_entries.clear()
         self.check_vars_act.clear()
         self.check_vars_tr.clear()
+        self.canvas_act.configure(scrollregion=(0, 0, 0, 0))
+        self.canvas_tr.configure(scrollregion=(0, 0, 0, 0))
+        self.canvas_act.yview_moveto(0)
+        self.canvas_tr.yview_moveto(0)
 
         if not self.current_project_id: return
         proj_dir = self.main_app.get_proj_dir(self.current_project_id)
@@ -788,9 +801,11 @@ class BRollTab:
             tk.Button(btn_fr2, text="🔄 Thay", bg="#f39c12", fg="white", font=("Arial", 8, "bold"), width=8, command=lambda v=vid_name: self.replace_video(v)).pack(side="left", padx=(0, 5))
             tk.Button(btn_fr2, text="🗑️ Xóa", bg="#e74c3c", fg="white", font=("Arial", 8, "bold"), width=8, command=lambda v=vid_name: self.move_to_trash(v)).pack(side="left")
 
-            txt_desc = tk.Text(row_fr, height=6, font=("Arial", 10), bg="#f9f9f9")
+            description_text = saved_vids.get(vid_name, {}).get("description", "")
+            visible_lines = max(6, min(12, len(description_text.splitlines()) + 1))
+            txt_desc = tk.Text(row_fr, height=visible_lines, font=("Arial", 10), bg="#f9f9f9", wrap="word")
             txt_desc.grid(row=0, column=3, sticky="nsew", padx=5)
-            txt_desc.insert("1.0", saved_vids.get(vid_name, {}).get("description", ""))
+            txt_desc.insert("1.0", description_text)
             txt_desc.bind("<MouseWheel>", self._on_mousewheel)
             self.desc_entries[vid_name] = txt_desc
 

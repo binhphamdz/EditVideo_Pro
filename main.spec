@@ -1,7 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import copy_metadata
 
 datas = [('icon.png', '.'), ('whoosh.MP3', '.')]
+datas += collect_data_files('uiautomator2')
 datas += copy_metadata('imageio')
 datas += copy_metadata('tqdm')
 datas += copy_metadata('imageio_ffmpeg')
