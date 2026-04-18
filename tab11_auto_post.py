@@ -227,20 +227,29 @@ class AutoPostTab:
         self.lbl_job_summary.pack(side="left")
         tk.Button(summary_bar, text="🔄 Làm mới danh sách", bg="#34495e", fg="white", font=("Arial", 9, "bold"), command=self.refresh_jobs_preview).pack(side="right")
 
-        cols = ("stt", "video", "product", "status")
+       # [MỚI] Thêm cột action
+        cols = ("stt", "video", "product", "status", "action")
         self.tree_jobs = ttk.Treeview(info_frame, columns=cols, show="headings", height=16)
         self.tree_jobs.heading("stt", text="STT")
         self.tree_jobs.heading("video", text="Tên Video")
         self.tree_jobs.heading("product", text="Tên Sản Phẩm")
         self.tree_jobs.heading("status", text="Trạng thái")
-        self.tree_jobs.column("stt", width=60, anchor="center")
-        self.tree_jobs.column("video", width=320, anchor="w")
-        self.tree_jobs.column("product", width=200, anchor="w")
-        self.tree_jobs.column("status", width=160, anchor="center")
+        self.tree_jobs.heading("action", text="Chức năng") # Tiêu đề cột mới
+        
+        # Điều chỉnh lại kích thước cho vừa vặn
+        self.tree_jobs.column("stt", width=50, anchor="center")
+        self.tree_jobs.column("video", width=250, anchor="w")
+        self.tree_jobs.column("product", width=180, anchor="w")
+        self.tree_jobs.column("status", width=120, anchor="center")
+        self.tree_jobs.column("action", width=120, anchor="center") # Ô chứa nút bắn
+        
         self.tree_jobs.tag_configure("done", foreground="#27ae60")
         self.tree_jobs.tag_configure("processing", foreground="#e67e22")
         self.tree_jobs.tag_configure("error", foreground="#c0392b")
         self.tree_jobs.tag_configure("pending", foreground="#2c3e50")
+
+        # [MỚI] Gắn cảm biến Click chuột vào bảng
+        self.tree_jobs.bind("<ButtonRelease-1>", self.on_tree_click)
 
         job_scroll = ttk.Scrollbar(info_frame, orient="vertical", command=self.tree_jobs.yview)
         self.tree_jobs.configure(yscrollcommand=job_scroll.set)
@@ -381,10 +390,11 @@ class AutoPostTab:
                 tag = "pending"
                 pending_count += 1
 
+            # Gắn thêm chữ [ 📤 Bắn Video ] vào vị trí cột thứ 5
             self.tree_jobs.insert(
                 "",
                 "end",
-                values=(job.get("stt", ""), job.get("video_name", ""), job.get("product_name", ""), status),
+                values=(job.get("stt", ""), job.get("video_name", ""), job.get("product_name", ""), status, "[ 📤 Bắn Video ]"),
                 tags=(tag,),
             )
 
@@ -640,16 +650,13 @@ class AutoPostTab:
 
                 update_job_status(video_name, "Đã đăng ✅")
                 self._clear_job_retry(device_id, video_name)
+                
                 # =========================================================
-                # [XÓA VIDEO TRÊN PC SAU KHI ĐĂNG THÀNH CÔNG]
+                # [GIỮ NGUYÊN VIDEO TRÊN PC SAU KHI ĐĂNG THÀNH CÔNG]
                 # =========================================================
-                upd_status("✅ Đăng xong, đang XÓA file gốc trên máy tính...")
-                if os.path.exists(video_path):
-                    try:
-                        os.remove(video_path) # Cho bay màu file luôn
-                    except Exception as e:
-                        print(f"Lỗi xóa file: {e}")
-                        
+                upd_status("✅ Đăng xong, giữ nguyên video gốc trên máy tính...")
+                
+                # Chỉ xóa video rác trên điện thoại để máy ko bị đầy dung lượng
                 self._cleanup_remote_file(adb_cmd, device_id, remote_video_path, creationflags)
                 current_job = None
                 # =========================================================
@@ -1057,6 +1064,80 @@ class AutoPostTab:
             self._broadcast_media_scan(adb_cmd, device_id, remote_path, creationflags)
         except Exception:
             pass
+
+    # =========================================================
+    # HÀM XỬ LÝ CLICK CHUỘT VÀ BẮN VIDEO THỦ CÔNG
+    # =========================================================
+    def on_tree_click(self, event):
+        if self.is_farming:
+            return # Đang chạy auto thì khóa không cho bấm tay tránh loạn
+
+        region = self.tree_jobs.identify("region", event.x, event.y)
+        if region != "cell": return
+
+        column = self.tree_jobs.identify_column(event.x)
+        if column == "#5": # #5 tương ứng với cột "action" (Chức năng)
+            item_id = self.tree_jobs.identify_row(event.y)
+            if item_id:
+                values = self.tree_jobs.item(item_id, "values")
+                video_name = values[1] # Tên video nằm ở cột thứ 2 (index 1)
+                self.manual_push_video(video_name)
+
+    def manual_push_video(self, video_name):
+        video_path = resolve_shopee_video_path(video_name)
+        if not os.path.exists(video_path):
+            messagebox.showerror("Lỗi", f"Không tìm thấy file video:\n{video_path}")
+            return
+
+        selected_devices = []
+        if hasattr(self.main_app, "tab5"):
+            selected_devices = self.main_app.tab5.get_selected_devices()
+
+        if not selected_devices:
+            messagebox.showwarning("Thiếu máy", "Bác chưa tick chọn máy điện thoại nào ở tab Quản Lý Điện Thoại để bắn sang!")
+            return
+
+        self.show_status_temp(f"🚀 Đang bắn video {video_name} sang {len(selected_devices)} máy... Bác đợi xíu nhé!", "blue", 3000)
+
+        def push_task():
+            adb_cmd = self.get_adb_path()
+            creationflags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+            remote_dir = "/sdcard/DCIM/Camera/"
+            import tempfile
+            
+            for device_id in selected_devices:
+                try:
+                    subprocess.run([adb_cmd, "-s", device_id, "shell", "mkdir", "-p", remote_dir], creationflags=creationflags)
+                    
+                    file_ext = os.path.splitext(video_path)[1] or ".mp4"
+                    safe_remote_name = f"manual_shopee_{int(time.time())}{file_ext}"
+                    remote_video_path = self._join_remote_path(remote_dir, safe_remote_name)
+                    
+                    temp_local_path = os.path.join(tempfile.gettempdir(), safe_remote_name)
+                    shutil.copy2(video_path, temp_local_path)
+                    
+                    result = subprocess.run(
+                        [adb_cmd, "-s", device_id, "push", temp_local_path, remote_video_path],
+                        capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=60, creationflags=creationflags
+                    )
+                    
+                    if result.returncode == 0:
+                        # Hack thời gian lên top 1 thư viện
+                        subprocess.run([adb_cmd, "-s", device_id, "shell", "touch", remote_video_path], creationflags=creationflags)
+                        self._broadcast_media_scan(adb_cmd, device_id, remote_video_path, creationflags)
+                        self.parent.after(0, lambda d=device_id: self.main_app.tab5.update_device_farm_status(d, f"✅ Bắn tay xong: {video_name}"))
+                    else:
+                        self.parent.after(0, lambda d=device_id: self.main_app.tab5.update_device_farm_status(d, "❌ Bắn tay thất bại."))
+                        
+                    if os.path.exists(temp_local_path):
+                        try: os.remove(temp_local_path)
+                        except: pass
+                except Exception as e:
+                    print(f"Lỗi bắn tay sang {device_id}: {e}")
+
+            self.parent.after(0, lambda: messagebox.showinfo("Hoàn tất", f"Đã bắn xong video '{video_name}' vào {len(selected_devices)} máy!\nBác mở thư viện ảnh điện thoại kiểm tra nhé."))
+            
+        threading.Thread(target=push_task, daemon=True).start()
 
 
 class LinkImportError(Exception):
