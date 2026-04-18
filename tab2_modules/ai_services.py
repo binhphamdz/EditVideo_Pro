@@ -10,6 +10,149 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+def _normalize_text(text):
+    return re.sub(r'\s+', ' ', str(text or '')).strip()
+
+
+def _format_timeline_text(segments):
+    lines = []
+    for item in segments:
+        text = _normalize_text(item.get("text", ""))
+        if not text:
+            continue
+        start = round(float(item.get("start", 0.0)), 2)
+        end = round(float(item.get("end", start)), 2)
+        lines.append(f"[{start}s - {end}s]: {text}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _parse_timeline_text(raw_voice_text):
+    items = []
+    pattern = re.compile(r'\[\s*([0-9]+(?:\.[0-9]+)?)s\s*-\s*([0-9]+(?:\.[0-9]+)?)s\s*\]:\s*(.+)')
+    for line in (raw_voice_text or "").splitlines():
+        match = pattern.match(line.strip())
+        if not match:
+            continue
+        start, end, text = match.groups()
+        text = _normalize_text(text)
+        if not text:
+            continue
+        items.append({"start": float(start), "end": float(end), "text": text})
+    return items
+
+
+def _segments_related(text_a, text_b):
+    a = _normalize_text(text_a).lower()
+    b = _normalize_text(text_b).lower()
+    if not a or not b:
+        return True
+
+    if a.endswith((",", ":", ";", "-", "–", "...")):
+        return True
+
+    connectors = [
+        "và", "rồi", "nhưng", "nên", "để", "khi", "vì", "còn",
+        "thì", "là", "với", "hay", "hoặc", "sau đó", "đồng thời"
+    ]
+    if any(b == c or b.startswith(c + " ") for c in connectors):
+        return True
+
+    tokens_a = {w for w in re.findall(r'\w+', a, flags=re.UNICODE) if len(w) > 1}
+    tokens_b = {w for w in re.findall(r'\w+', b, flags=re.UNICODE) if len(w) > 1}
+    if tokens_a & tokens_b:
+        return True
+
+    return len(tokens_a) <= 4 or len(tokens_b) <= 4
+
+
+def _merge_related_short_segments(segments, target_min=4.0, target_max=6.0):
+    if not segments:
+        return []
+
+    merged = []
+    i = 0
+    while i < len(segments):
+        current = {
+            "start": float(segments[i].get("start", 0.0)),
+            "end": float(segments[i].get("end", 0.0)),
+            "text": _normalize_text(segments[i].get("text", ""))
+        }
+
+        while i + 1 < len(segments):
+            nxt = {
+                "start": float(segments[i + 1].get("start", current["end"])),
+                "end": float(segments[i + 1].get("end", current["end"])),
+                "text": _normalize_text(segments[i + 1].get("text", ""))
+            }
+            if not nxt["text"]:
+                i += 1
+                continue
+
+            current_dur = current["end"] - current["start"]
+            combined_dur = nxt["end"] - current["start"]
+            gap = max(0.0, nxt["start"] - current["end"])
+
+            if gap > 1.2:
+                break
+
+            should_merge = False
+            if current_dur < target_min and combined_dur <= target_max + 0.8 and _segments_related(current["text"], nxt["text"]):
+                should_merge = True
+            elif len(current["text"].split()) <= 6 and combined_dur <= target_max and _segments_related(current["text"], nxt["text"]):
+                should_merge = True
+
+            if not should_merge:
+                break
+
+            current["end"] = nxt["end"]
+            current["text"] = _normalize_text(current["text"].rstrip(", ") + " " + nxt["text"])
+            i += 1
+
+            if (current["end"] - current["start"]) >= target_min and current["text"].endswith((".", "!", "?")):
+                break
+
+        merged.append(current)
+        i += 1
+
+    return merged
+
+
+def _words_to_base_segments(words_list):
+    segments = []
+    chunk = []
+
+    for word_data in words_list:
+        word = _normalize_text(word_data.get('word', ''))
+        if word in ['<start>', '<end>', '']:
+            continue
+
+        chunk.append({
+            "start": float(word_data.get('start_time', 0.0)),
+            "end": float(word_data.get('end_time', 0.0)),
+            "text": word
+        })
+
+        chunk_dur = chunk[-1]["end"] - chunk[0]["start"]
+        is_sentence_end = any(word.endswith(p) for p in ['.', '?', '!', ';', ':'])
+
+        if is_sentence_end or chunk_dur >= 5.2 or len(chunk) >= 14:
+            segments.append({
+                "start": chunk[0]["start"],
+                "end": chunk[-1]["end"],
+                "text": " ".join(item["text"] for item in chunk)
+            })
+            chunk = []
+
+    if chunk:
+        segments.append({
+            "start": chunk[0]["start"],
+            "end": chunk[-1]["end"],
+            "text": " ".join(item["text"] for item in chunk)
+        })
+
+    return segments
+
+
 def get_drive_service(client_secret_path, base_path):
     SCOPES = ['https://www.googleapis.com/auth/drive.file']
     creds = None
@@ -31,7 +174,7 @@ def get_drive_service(client_secret_path, base_path):
 def get_transcription(voice_path, voice_name, mode, config, log_cb):
     if mode == "groq":
         log_cb(f"[{voice_name}] Bắt đầu: Gọi Groq bóc băng...")
-        url_groq = "[https://api.groq.com/openai/v1/audio/transcriptions](https://api.groq.com/openai/v1/audio/transcriptions)"
+        url_groq = "https://api.groq.com/openai/v1/audio/transcriptions"
         with open(voice_path, "rb") as f:
             res_groq = requests.post(
                 url_groq, 
@@ -42,7 +185,16 @@ def get_transcription(voice_path, voice_name, mode, config, log_cb):
             )
         if res_groq.status_code != 200: raise Exception(f"Lỗi Groq: {res_groq.text}")
         raw_segments = res_groq.json().get("segments", [])
-        return "".join([f"[{round(s['start'], 2)}s - {round(s['end'], 2)}s]: {s['text'].strip()}\n" for s in raw_segments])
+        base_segments = [
+            {
+                "start": float(s.get("start", 0.0)),
+                "end": float(s.get("end", 0.0)),
+                "text": _normalize_text(s.get("text", ""))
+            }
+            for s in raw_segments if _normalize_text(s.get("text", ""))
+        ]
+        merged_segments = _merge_related_short_segments(base_segments, target_min=4.0, target_max=6.0)
+        return _format_timeline_text(merged_segments)
 
     elif mode == "ohfree":
         # =================================================================
@@ -75,7 +227,9 @@ def get_transcription(voice_path, voice_name, mode, config, log_cb):
             
             words_list = res.json().get('data', {}).get('words', [])
             if not words_list: raise Exception("OhFree không trả về text!")
-            return "".join([f"[{w['start_time']}s - {w['end_time']}s]: {w['word']}\n" for w in words_list if w['word'] not in ['<start>', '<end>', '']])
+            base_segments = _words_to_base_segments(words_list)
+            merged_segments = _merge_related_short_segments(base_segments, target_min=4.0, target_max=6.0)
+            return _format_timeline_text(merged_segments)
         finally:
             try: drive_service.files().delete(fileId=file_id).execute()
             except: pass
@@ -86,10 +240,16 @@ def get_director_timeline(voice_text, broll_text, config, log_cb, voice_name):
     import json
     import re
     
+    # 👉 [SẾP THÊM ĐÚNG DÒNG NÀY VÀO ĐÂY NHÉ] 
+    # Gọi AI Vòng 0 để "Gom câu chống giật" trước khi Đạo diễn Vòng 1 làm việc:
+    voice_text = optimize_voice_timeline_by_ai(voice_text, config, log_cb, voice_name)
+    
     # =========================================================
     # Hàm Bóc Vỏ JSON & Sửa Lỗi Vặt (Trailing Commas)
     # =========================================================
     def extract_json_array(text):
+        json_str = ""
+        # ... (các đoạn code bên dưới của sếp giữ nguyên 100%) ...
         json_str = ""
         match = re.search(r'```json\s*(\[.*?\])\s*```', text, re.DOTALL | re.IGNORECASE)
         if match: json_str = match.group(1)
@@ -238,3 +398,67 @@ VÒNG 2 - CHỐT HẠ CHUỖI VIDEO:
     log_cb(f"[{voice_name}] ✅ Kiểm tra xong - Video trong video không bị lặp.")
 
     return final_timeline
+
+
+def optimize_voice_timeline_by_ai(raw_voice_text, config, log_cb, voice_name):
+    import time
+    import requests
+    import json
+    import re
+    
+    # Hàm bóc vỏ JSON (Tái sử dụng lại cho chắc cú)
+    def extract_json_array(text):
+        json_str = ""
+        match = re.search(r'```json\s*(\[.*?\])\s*```', text, re.DOTALL | re.IGNORECASE)
+        if match: json_str = match.group(1)
+        else:
+            match = re.search(r'```\s*(\[.*?\])\s*```', text, re.DOTALL)
+            if match: json_str = match.group(1)
+            else:
+                match = re.search(r'\[.*\]', text, re.DOTALL)
+                if match: json_str = match.group(0)
+                else: raise ValueError("Không tìm thấy mảng JSON!")
+        json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
+        return json.loads(json_str)
+
+    parsed_items = _parse_timeline_text(raw_voice_text)
+    if parsed_items:
+        raw_voice_text = _format_timeline_text(_merge_related_short_segments(parsed_items, target_min=4.0, target_max=6.0))
+
+    log_cb(f"[{voice_name}] VÒNG 0: Đang nhờ AI Biên Tập gom các câu ngắn lại cho mượt...")
+    
+    prompt_0 = f"""Dưới đây là kịch bản giọng đọc dạng Text kèm thời gian (start - end) bị ngắt quá vụn vặt:
+{raw_voice_text}
+
+NHIỆM VỤ CỦA BẠN:
+1. Đọc, hiểu ngữ cảnh và GHÉP các từ/câu ngắn liên tiếp lại thành các câu dài hơn, có ý nghĩa trọn vẹn và ngữ pháp chuẩn.
+2. TỐI ƯU THỜI LƯỢNG: Ưu tiên ghép sao cho mỗi câu sau khi gộp dài khoảng 4 ĐẾN 6 GIÂY là đẹp nhất.
+3. Nếu câu vẫn quá ngắn nhưng cùng ý rõ ràng với câu kế bên thì tiếp tục ghép; nếu khác ý thì giữ riêng.
+4. TÍNH TOÁN THỜI GIAN: 'start' là thời gian của phần tử đầu tiên, 'end' là thời gian của phần tử cuối cùng trong nhóm được ghép.
+5. Không được tạo thêm nội dung mới, chỉ được nối và làm mượt câu gốc.
+6. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
+[ {{"start": 0.0, "end": 4.5, "text": "Nội dung câu đã được ghép mượt mà..."}}, ... ]"""
+
+    payload_0 = {"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": prompt_0}], "temperature": 0.2}
+    url_kie = "https://api.kie.ai/gemini-2.5-flash/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {config.get('kie_key')}", "Content-Type": "application/json"}
+
+    optimized_text = ""
+    for attempt in range(3):
+        try:
+            time.sleep(1)
+            res = requests.post(url_kie, headers=headers, json=payload_0, timeout=180)
+            if res.status_code != 200: raise Exception(f"Lỗi API Vòng 0: {res.text}")
+            
+            raw_out = res.json()["choices"][0]["message"]["content"]
+            final_json = extract_json_array(raw_out)
+            final_json = _merge_related_short_segments(final_json, target_min=4.0, target_max=6.0)
+            optimized_text = _format_timeline_text(final_json)
+            break
+        except Exception as e:
+            if attempt == 2:
+                log_cb(f"[{voice_name}] ⚠️ Vòng 0 thất bại. Bỏ qua và dùng kịch bản gốc.")
+                return raw_voice_text # Lỗi thì trả về kịch bản gốc, không làm gián đoạn
+            log_cb(f"[{voice_name}] ⚠️ Vòng 0 AI gom câu bị vấp, đang thử lại (Lần {attempt+2}/3)...")
+
+    return optimized_text if optimized_text else raw_voice_text

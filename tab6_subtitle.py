@@ -119,23 +119,51 @@ class SubtitleTab:
         srt_content = ""
         chunk = []
         chunk_index = 1
-        
-        for i, word_data in enumerate(words_list):
+        min_duration = 4.0
+        max_duration = 6.0
+
+        def flush_chunk():
+            nonlocal srt_content, chunk, chunk_index
+            if not chunk:
+                return
+
+            start_t = self.format_srt_time(chunk[0]['start_time'])
+            end_t = self.format_srt_time(chunk[-1]['end_time'])
+            text = " ".join(w['word'] for w in chunk)
+            text = (text.replace(" ,", ",")
+                        .replace(" .", ".")
+                        .replace(" !", "!")
+                        .replace(" ?", "?")
+                        .replace(" :", ":")
+                        .strip())
+
+            srt_content += f"{chunk_index}\n{start_t} --> {end_t}\n{text}\n\n"
+            chunk_index += 1
+            chunk = []
+
+        for word_data in words_list:
             word = word_data.get('word', '').strip()
-            if word in ['<start>', '<end>', '']: continue
-                
-            chunk.append(word_data)
-            is_end_sentence = any(p in word for p in ['.', ',', '?', '!', ':'])
-            
-            if len(chunk) >= 7 or is_end_sentence or i == len(words_list) - 1:
-                start_t = self.format_srt_time(chunk[0]['start_time'])
-                end_t = self.format_srt_time(chunk[-1]['end_time'])
-                text = " ".join([w['word'] for w in chunk])
-                
-                srt_content += f"{chunk_index}\n{start_t} --> {end_t}\n{text}\n\n"
-                chunk_index += 1
-                chunk = []
-                
+            if word in ['<start>', '<end>', '']:
+                continue
+
+            entry = {
+                'word': word,
+                'start_time': float(word_data.get('start_time', 0.0)),
+                'end_time': float(word_data.get('end_time', 0.0))
+            }
+            chunk.append(entry)
+
+            chunk_duration = chunk[-1]['end_time'] - chunk[0]['start_time']
+            is_sentence_end = any(word.endswith(p) for p in ['.', '?', '!', ';', ':'])
+            is_soft_break = word.endswith(',')
+
+            if chunk_duration >= max_duration or len(chunk) >= 16:
+                flush_chunk()
+            elif chunk_duration >= min_duration and (is_sentence_end or is_soft_break):
+                flush_chunk()
+
+        flush_chunk()
+
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(srt_content)
         self.add_log(f"✅ HOÀN TẤT: File phụ đề nằm tại thư mục video gốc!")

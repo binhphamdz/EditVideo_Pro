@@ -12,6 +12,11 @@ from PIL import Image, ImageDraw, ImageFont
 # =======================================================
 csv_write_lock = threading.Lock()
 
+SAFE_XFADE_TRANSITIONS = {
+    'fade', 'slideleft', 'slideright', 'slideup', 'slidedown',
+    'wipeleft', 'wiperight', 'hlslice', 'zoomin'
+}
+
 def get_vid_info(file_path):
     """Lấy độ dài và kiểm tra xem video có chứa rãnh Audio hay không"""
     try:
@@ -205,14 +210,22 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
         # [BÙA CHỐNG KẸT FFMPEG 3] - XỬ LÝ CONCAT SCENE
         # =======================================================
         if len(scene_input_vids) > 1:
-            concat_sc_flt = "".join(scene_input_vids) + f"concat=n={len(scene_input_vids)}:v=1:a=0[scenev{i}]"
+            raw_scene_label = f"[scenev_raw{i}]"
+            scene_label = f"[scenev{i}]"
+            concat_sc_flt = "".join(scene_input_vids) + f"concat=n={len(scene_input_vids)}:v=1:a=0{raw_scene_label}"
             v_filters.append(concat_sc_flt)
-            pre_labels.append(f"[scenev{i}]")
+            v_filters.append(f"{raw_scene_label}settb=AVTB,setpts=PTS-STARTPTS,fps=30{scene_label}")
+            pre_labels.append(scene_label)
         elif len(scene_input_vids) == 1:
-            pre_labels.append(scene_input_vids[0]) # Ép thẳng vào luôn, khỏi nối n=1 làm FFmpeg ngáo
+            scene_label = f"[scenev{i}]"
+            v_filters.append(f"{scene_input_vids[0]}settb=AVTB,setpts=PTS-STARTPTS,fps=30{scene_label}")
+            pre_labels.append(scene_label)
 
     inputs.extend(['-i', voice_path])
     voice_idx = vid_input_idx 
+    chosen_trans = None
+    flt_fade = None
+    xfade_fallback_flt = None
 
     # =======================================================
     # [BÙA CHỐNG KẸT FFMPEG 4] - XỬ LÝ CONCAT FINAL (Vào Lò)
@@ -247,18 +260,22 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
             available_trans = ['fade']
         
         chosen_trans = random.choice(available_trans)
+        if chosen_trans not in SAFE_XFADE_TRANSITIONS:
+            log_cb(f"[{voice_name}] ⚠️ Hiệu ứng '{chosen_trans}' chưa tương thích FFmpeg hiện tại. Tự đổi sang fade để tránh lỗi render.")
+            chosen_trans = 'fade'
         
-        flt_fade = f"{pre_labels[0]}{pre_labels[1]}xfade=transition={chosen_trans}:duration={trans_dur}:offset={fade_offset}{label_fade}"
+        flt_fade = f"{pre_labels[0]}{pre_labels[1]}xfade=transition={chosen_trans}:duration={trans_dur}:offset={fade_offset},settb=AVTB,setpts=PTS-STARTPTS{label_fade}"
+        xfade_fallback_flt = f"{pre_labels[0]}{pre_labels[1]}concat=n=2:v=1:a=0,settb=AVTB,setpts=PTS-STARTPTS{label_fade}"
         v_filters.append(flt_fade)
         
         concat_inputs = [label_fade] + pre_labels[2:]
         if len(concat_inputs) > 1:
-            v_filters.append(f"{''.join(concat_inputs)}concat=n={len(concat_inputs)}:v=1:a=0[outv]")
+            v_filters.append(f"{''.join(concat_inputs)}concat=n={len(concat_inputs)}:v=1:a=0,settb=AVTB,setpts=PTS-STARTPTS[outv]")
             outv_map = "[outv]"
         else:
             outv_map = label_fade
     elif len(pre_labels) > 1:
-        v_filters.append(f"{''.join(pre_labels)}concat=n={len(pre_labels)}:v=1:a=0[outv]")
+        v_filters.append(f"{''.join(pre_labels)}concat=n={len(pre_labels)}:v=1:a=0,settb=AVTB,setpts=PTS-STARTPTS[outv]")
         outv_map = "[outv]"
         fade_offset = 0
     elif len(pre_labels) == 1:
@@ -312,14 +329,27 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
     ]
 
     process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creation_flags)
-    if process.returncode != 0: raise Exception(f"Lỗi FFmpeg Render Lõi: {process.stderr[-1000:]}")
+    if process.returncode != 0 and chosen_trans and ("Not yet implemented in FFmpeg" in process.stderr or "Error applying option 'transition'" in process.stderr):
+        log_cb(f"[{voice_name}] ⚠️ FFmpeg không hỗ trợ hiệu ứng '{chosen_trans}'. Tự render lại bằng fade...")
+        fallback_filter_complex = filter_complex.replace(f"transition={chosen_trans}", "transition=fade", 1)
+        with open(filter_script_path, 'w', encoding='utf-8') as f:
+            f.write(fallback_filter_complex)
+        process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creation_flags)
+    if process.returncode != 0 and flt_fade and xfade_fallback_flt and ("Parsed_xfade" in process.stderr or "do not match" in process.stderr or "Failed to configure output pad" in process.stderr):
+        log_cb(f"[{voice_name}] ⚠️ Xfade bị lệch timebase. Tự render lại không dùng transition để tránh hỏng video...")
+        fallback_filter_complex = filter_complex.replace(flt_fade, xfade_fallback_flt, 1)
+        with open(filter_script_path, 'w', encoding='utf-8') as f:
+            f.write(fallback_filter_complex)
+        process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creation_flags)
+
+    if process.returncode != 0: raise Exception(f"Lỗi FFmpeg Render Lõi: {process.stderr[-1500:]}")
 
     log_cb(f"[{voice_name}] Đang bốc ngẫu nhiên 1 frame làm ảnh bìa...")
     safe_max_time = max(1.0, voice_dur - 1.0)
     random_t = random.uniform(1.0, safe_max_time)
     
     temp_frame_jpg = os.path.join(out_dir, f"temp_frame_{os.path.splitext(voice_name)[0]}.jpg")
-    subprocess.run(['ffmpeg', '-y', '-ss', f"{random_t:.2f}", '-i', temp_main_mp4, '-frames:v', '1', temp_frame_jpg], capture_output=True, creationflags=creation_flags)
+    subprocess.run(['ffmpeg', '-y', '-ss', f"{random_t:.2f}", '-i', temp_main_mp4, '-frames:v', '1', '-update', '1', temp_frame_jpg], capture_output=True, creationflags=creation_flags)
     
     temp_cover_png = os.path.join(out_dir, f"temp_cover_{os.path.splitext(voice_name)[0]}.png")
     with Image.open(temp_frame_jpg).convert("RGBA") as img:
