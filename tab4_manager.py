@@ -10,6 +10,8 @@ import threading
 import http.server
 import socketserver
 
+from shopee_export import delete_shopee_jobs
+
 class ManagerTab:
     def __init__(self, parent, main_app):
         self.parent = parent
@@ -325,6 +327,7 @@ class ManagerTab:
         
         from main import EXCEL_LOG_FILE
         deleted_paths = [self.tree.item(i)['values'][3] for i in selected]
+        deleted_video_names = [os.path.basename(path) for path in deleted_paths]
         
         for path in deleted_paths:
             try:
@@ -347,6 +350,13 @@ class ManagerTab:
                 writer = csv.writer(f)
                 writer.writerow(header)
                 writer.writerows(rows)
+
+        try:
+            delete_shopee_jobs(deleted_video_names, config=self.main_app.config)
+            if hasattr(self.main_app, "tab11"):
+                self.main_app.root.after(0, self.main_app.tab11.refresh_jobs_preview)
+        except Exception as e:
+            print(f"Không xóa được job Shopee tương ứng: {e}")
                 
         self.load_excel_data()
 

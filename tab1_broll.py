@@ -744,6 +744,29 @@ class BRollTab:
         normalized_text = re.sub(r"[^a-z0-9\s]", " ", normalized_text)
         return re.sub(r"\s+", " ", normalized_text).strip()
 
+    def _looks_like_voice_test_intro(self, text):
+        normalized_text = self._normalize_voice_marker_text(text)
+        if not normalized_text:
+            return False
+
+        trigger_phrases = [
+            "day la giong noi thu cua toi",
+            "day la giong noi thu cua tui",
+            "giong noi thu cua toi",
+            "giong noi thu cua tui",
+            "day la giong noi thu",
+            "giong noi thu",
+        ]
+        if any(phrase in normalized_text for phrase in trigger_phrases):
+            return True
+
+        words = set(normalized_text.split())
+        if not {"giong", "noi", "thu"}.issubset(words):
+            return False
+
+        extra_hits = sum(word in words for word in ["day", "la", "cua", "toi", "tui"])
+        return extra_hits >= 2
+
     def _parse_voice_timeline_text(self, timeline_text):
         timeline_items = []
         pattern = re.compile(r"\[\s*([0-9]+(?:\.[0-9]+)?)s\s*-\s*([0-9]+(?:\.[0-9]+)?)s\s*\]:\s*(.+)")
@@ -763,11 +786,10 @@ class BRollTab:
         return timeline_items
 
     def _detect_voice_test_intro_end(self, timeline_text):
-        target_text = self._normalize_voice_marker_text("Đây Là Giọng Nói Thử Của Tôi")
         accumulated_text = ""
 
         for idx, item in enumerate(self._parse_voice_timeline_text(timeline_text)):
-            if idx >= 4 or item["start"] > 12.0:
+            if idx >= 6 or item["start"] > 15.0:
                 break
 
             caption_text = self._normalize_voice_marker_text(item.get("text", ""))
@@ -775,11 +797,8 @@ class BRollTab:
                 continue
 
             accumulated_text = f"{accumulated_text} {caption_text}".strip()
-            if accumulated_text.startswith(target_text):
+            if self._looks_like_voice_test_intro(caption_text) or self._looks_like_voice_test_intro(accumulated_text):
                 return max(0.0, round(item["end"] + 0.05, 2))
-            if target_text.startswith(accumulated_text):
-                continue
-            return 0.0
 
         return 0.0
 
@@ -831,13 +850,21 @@ class BRollTab:
     def _transcribe_voice_with_auto_trim(self, project_id, voice_name, voice_path):
         mode = self.main_app.config.get("boc_bang_mode", "groq")
         log_cb = lambda msg, pid=project_id: self._log_extract(msg, project_id=pid)
-        srt_text = get_transcription(voice_path, voice_name, mode, self.main_app.config, log_cb)
 
-        trim_start_seconds = self._detect_voice_test_intro_end(srt_text)
-        if trim_start_seconds > 0:
-            self._log_extract(f"✂️ Phát hiện câu test ở đầu {voice_name}, cắt {trim_start_seconds:.2f}s...", project_id=project_id)
-            self._trim_voice_file(voice_path, trim_start_seconds)
+        srt_text = ""
+        for attempt in range(3):
             srt_text = get_transcription(voice_path, voice_name, mode, self.main_app.config, log_cb)
+            trim_start_seconds = self._detect_voice_test_intro_end(srt_text)
+
+            if trim_start_seconds <= 0:
+                break
+
+            self._log_extract(
+                f"✂️ Phát hiện câu test ở đầu {voice_name}, cắt {trim_start_seconds:.2f}s...",
+                project_id=project_id,
+            )
+            if not self._trim_voice_file(voice_path, trim_start_seconds):
+                break
 
         return srt_text
 
@@ -915,7 +942,9 @@ class BRollTab:
         
         # Check xem có cache không
         if "voice_srt_cache" in p_data and voice_name in p_data["voice_srt_cache"]:
-            return p_data["voice_srt_cache"][voice_name]
+            cached_srt = p_data["voice_srt_cache"][voice_name]
+            if self._detect_voice_test_intro_end(cached_srt) <= 0:
+                return cached_srt
         
         return None
     
@@ -925,9 +954,12 @@ class BRollTab:
         
         # 1. Check cache trước
         if "voice_srt_cache" in p_data and voice_name in p_data["voice_srt_cache"]:
-            return p_data["voice_srt_cache"][voice_name]
+            cached_srt = p_data["voice_srt_cache"][voice_name]
+            if self._detect_voice_test_intro_end(cached_srt) <= 0:
+                return cached_srt
+            self._log_extract(f"⚠️ Phát hiện voice {voice_name} còn câu test trong cache, đang bóc lại...", project_id=project_id)
         
-        # 2. Nếu chưa cache, extract ngay (blocking call)
+        # 2. Nếu chưa cache hoặc cache còn câu test, extract ngay (blocking call)
         try:
             srt_text = self._transcribe_voice_with_auto_trim(project_id, voice_name, voice_path)
             

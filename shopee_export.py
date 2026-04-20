@@ -213,6 +213,52 @@ def update_shopee_status(video_name, new_status, csv_path=None, config=None):
         return _update_csv_status(target_csv, video_name, new_status)
 
 
+def delete_shopee_jobs(video_names, csv_path=None, config=None):
+    target_csv = csv_path or get_shopee_csv_path(config)
+    if not os.path.exists(target_csv):
+        return 0
+
+    if isinstance(video_names, str):
+        video_names = [video_names]
+
+    normalized_names = {str(name or "").strip() for name in video_names if str(name or "").strip()}
+    if not normalized_names:
+        return 0
+
+    with _export_lock:
+        rows = _read_csv_rows(target_csv)
+        if not rows:
+            return 0
+
+        header = rows[0]
+        col_map = _get_column_map(header)
+        video_idx = col_map["video"] - 1
+        stt_idx = col_map["stt"] - 1
+
+        kept_rows = [header]
+        removed_count = 0
+
+        for row in rows[1:]:
+            while len(row) < len(SHOPEE_HEADERS):
+                row.append("")
+
+            row_video_name = str(row[video_idx] or "").strip()
+            if row_video_name in normalized_names:
+                removed_count += 1
+                continue
+
+            kept_rows.append(row)
+
+        if removed_count > 0:
+            for order, row in enumerate(kept_rows[1:], start=1):
+                while len(row) <= stt_idx:
+                    row.append("")
+                row[stt_idx] = order
+            _write_csv_rows(target_csv, kept_rows)
+
+        return removed_count
+
+
 def load_shopee_jobs(csv_path=None, config=None):
     target_csv = csv_path or get_shopee_csv_path(config)
     if not os.path.exists(target_csv):

@@ -3,7 +3,9 @@ import random
 import subprocess
 import csv
 import json
+import shutil
 import threading # [MỚI] IMPORT THƯ VIỆN KHÓA
+import time
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 from shopee_export import export_rendered_video_to_shopee_files, is_shopee_out_of_stock_project
@@ -489,44 +491,90 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
 
     if process.returncode != 0: raise Exception(f"Lỗi FFmpeg Render Lõi: {process.stderr[-1500:]}")
 
-    log_cb(f"[{voice_name}] Đang bốc ngẫu nhiên 1 frame làm ảnh bìa...")
-    safe_max_time = max(1.0, voice_dur - 1.0)
-    random_t = random.uniform(1.0, safe_max_time)
-    
-    temp_frame_jpg = os.path.join(out_dir, f"temp_frame_{os.path.splitext(voice_name)[0]}.jpg")
-    subprocess.run(['ffmpeg', '-y', '-ss', f"{random_t:.2f}", '-i', temp_main_mp4, '-frames:v', '1', '-update', '1', temp_frame_jpg], capture_output=True, creationflags=creation_flags)
-    
-    temp_cover_png = os.path.join(out_dir, f"temp_cover_{os.path.splitext(voice_name)[0]}.png")
-    with Image.open(temp_frame_jpg).convert("RGBA") as img:
-        draw = ImageDraw.Draw(img)
-        img_w, img_h = img.size
-        clean_proj_name = " ".join(proj_name.replace("_", " ").split()).upper()
-        display_text, font, stroke_w, line_spacing = _choose_cover_layout(
-            draw,
-            clean_proj_name,
-            img_w,
-            img_h,
-            custom_font,
-        )
-        draw.multiline_text(
-            (img_w / 2, img_h / 2),
-            display_text,
-            font=font,
-            fill="white",
-            align="center",
-            anchor="mm",
-            spacing=line_spacing,
-            stroke_width=stroke_w,
-            stroke_fill="black",
-        )
-        img.convert("RGB").save(temp_cover_png)
+    safe_stem = os.path.splitext(voice_name)[0]
+    temp_token = f"{safe_stem}_{int(time.time() * 1000)}_{threading.get_ident()}"
+    temp_frame_jpg = os.path.join(out_dir, f"temp_frame_{temp_token}.jpg")
+    temp_cover_png = os.path.join(out_dir, f"temp_cover_{temp_token}.png")
 
-    ffmpeg_concat_cmd = [
-        "ffmpeg", "-y", "-loop", "1", "-t", "0.1", "-i", temp_cover_png, "-i", temp_main_mp4,
-        "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "1:a",
-        "-c:v", "h264_nvenc", "-preset", "p1", "-b:v", "8000k", "-c:a", "copy", out_file
-    ]
-    subprocess.run(ffmpeg_concat_cmd, capture_output=True, text=True, errors='ignore', creationflags=creation_flags)
+    log_cb(f"[{voice_name}] Đang bốc ngẫu nhiên 1 frame làm ảnh bìa...")
+    extract_points = []
+    if voice_dur > 0:
+        safe_max_time = max(0.0, voice_dur - 0.3)
+        if safe_max_time <= 0.0:
+            extract_points = [0.0]
+        else:
+            extract_points = sorted({
+                round(min(max(0.0, random.uniform(0.0, safe_max_time)), safe_max_time), 2),
+                round(min(0.1, safe_max_time), 2),
+                round(min(max(0.0, voice_dur * 0.25), safe_max_time), 2),
+                round(min(max(0.0, voice_dur * 0.5), safe_max_time), 2),
+            })
+    else:
+        extract_points = [0.0]
+
+    frame_ready = False
+    frame_error = ""
+    for point in extract_points:
+        frame_result = subprocess.run(
+            ['ffmpeg', '-y', '-ss', f"{point:.2f}", '-i', temp_main_mp4, '-frames:v', '1', temp_frame_jpg],
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='ignore',
+            creationflags=creation_flags,
+        )
+        if frame_result.returncode == 0 and os.path.exists(temp_frame_jpg) and os.path.getsize(temp_frame_jpg) > 0:
+            frame_ready = True
+            break
+        frame_error = (frame_result.stderr or frame_result.stdout or "Không rõ lỗi")[-400:]
+
+    final_video_ready = False
+    if frame_ready:
+        try:
+            with Image.open(temp_frame_jpg).convert("RGBA") as img:
+                draw = ImageDraw.Draw(img)
+                img_w, img_h = img.size
+                clean_proj_name = " ".join(proj_name.replace("_", " ").split()).upper()
+                display_text, font, stroke_w, line_spacing = _choose_cover_layout(
+                    draw,
+                    clean_proj_name,
+                    img_w,
+                    img_h,
+                    custom_font,
+                )
+                draw.multiline_text(
+                    (img_w / 2, img_h / 2),
+                    display_text,
+                    font=font,
+                    fill="white",
+                    align="center",
+                    anchor="mm",
+                    spacing=line_spacing,
+                    stroke_width=stroke_w,
+                    stroke_fill="black",
+                )
+                img.convert("RGB").save(temp_cover_png)
+
+            ffmpeg_concat_cmd = [
+                "ffmpeg", "-y", "-loop", "1", "-t", "0.1", "-i", temp_cover_png, "-i", temp_main_mp4,
+                "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "1:a",
+                "-c:v", "h264_nvenc", "-preset", "p1", "-b:v", "8000k", "-c:a", "copy", out_file
+            ]
+            concat_result = subprocess.run(ffmpeg_concat_cmd, capture_output=True, text=True, errors='ignore', creationflags=creation_flags)
+            final_video_ready = concat_result.returncode == 0 and os.path.exists(out_file) and os.path.getsize(out_file) > 0
+
+            if not final_video_ready:
+                frame_error = (concat_result.stderr or concat_result.stdout or "Ghép ảnh bìa thất bại")[-400:]
+        except Exception as cover_error:
+            frame_error = str(cover_error)
+
+    if not final_video_ready:
+        log_cb(f"[{voice_name}] ⚠️ Không tạo được ảnh bìa tạm, dùng luôn video render gốc. {frame_error[:180]}")
+        shutil.copy2(temp_main_mp4, out_file)
+        final_video_ready = os.path.exists(out_file) and os.path.getsize(out_file) > 0
+
+    if not final_video_ready:
+        raise Exception(f"Không lưu được video đầu ra cho {voice_name}")
 
     for f_path in [filter_script_path, temp_main_mp4, temp_frame_jpg, temp_cover_png]:
         if os.path.exists(f_path):
