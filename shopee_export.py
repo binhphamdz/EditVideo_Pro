@@ -6,13 +6,13 @@ import threading
 import unicodedata
 from urllib.parse import urlsplit, urlunsplit
 
-from paths import BASE_PATH
+from paths import get_active_profile, get_export_dir, get_posted_video_dir, get_profile_dir, get_shopee_csv_file
 
 
-WORKSPACE_DIR = os.path.join(BASE_PATH, "Workspace_Data")
-VIDEO_OUTPUT_DIR = os.path.join(WORKSPACE_DIR, "Kho_Video_Xuat_Xuong")
-POSTED_VIDEO_DIR = os.path.join(VIDEO_OUTPUT_DIR, "DA_DANG")
-DEFAULT_SHOPEE_EXPORT_CSV = os.path.join(WORKSPACE_DIR, "Danh_sach_video_Shopee.csv")
+WORKSPACE_DIR = ""
+VIDEO_OUTPUT_DIR = ""
+POSTED_VIDEO_DIR = ""
+DEFAULT_SHOPEE_EXPORT_CSV = ""
 SHOPEE_HEADERS = ["STT", "Tên Video", "Tên Sản Phẩm", "Link shoppe", "Caption", "Trạng thái"]
 PENDING_SHOPEE_STATUSES = {"", "Chưa chuyển", "Chưa đăng", "Sẵn sàng đăng"}
 CAPTION_HASHTAGS = "#VideohangDoiSong #VideohangLamDep #VideohangTieuDung #shoppevideo #LuotVuiMuaLien #KOLUyTin #VideoHangGiaDung"
@@ -20,10 +20,31 @@ CAPTION_HASHTAGS = "#VideohangDoiSong #VideohangLamDep #VideohangTieuDung #shopp
 _export_lock = threading.Lock()
 
 
+def _sync_profile_paths():
+    global WORKSPACE_DIR, VIDEO_OUTPUT_DIR, POSTED_VIDEO_DIR, DEFAULT_SHOPEE_EXPORT_CSV
+    WORKSPACE_DIR = get_profile_dir()
+    VIDEO_OUTPUT_DIR = get_export_dir()
+    POSTED_VIDEO_DIR = get_posted_video_dir()
+    DEFAULT_SHOPEE_EXPORT_CSV = get_shopee_csv_file()
+
+
+def get_video_output_dir():
+    _sync_profile_paths()
+    return VIDEO_OUTPUT_DIR
+
+
 def get_shopee_csv_path(config=None):
+    _sync_profile_paths()
     configured_path = ""
+
     if isinstance(config, dict):
-        configured_path = str(config.get("shopee_csv_path", "") or "").strip()
+        active_profile = get_active_profile()
+        profile_csv_paths = config.get("shopee_csv_paths", {})
+        if isinstance(profile_csv_paths, dict):
+            configured_path = str(profile_csv_paths.get(active_profile, "") or "").strip()
+
+        if not configured_path:
+            configured_path = str(config.get("shopee_csv_path", "") or "").strip()
 
     if configured_path:
         return os.path.abspath(os.path.expanduser(configured_path))
@@ -325,6 +346,7 @@ def claim_next_shopee_job(worker_label, csv_path=None, config=None):
 
 
 def resolve_shopee_video_path(video_name):
+    _sync_profile_paths()
     for folder in (VIDEO_OUTPUT_DIR, POSTED_VIDEO_DIR):
         candidate = os.path.join(folder, video_name)
         if os.path.exists(candidate):

@@ -10,9 +10,9 @@ import cv2
 
 from paths import BASE_PATH
 from shopee_export import (
-    VIDEO_OUTPUT_DIR,
     claim_next_shopee_job,
     get_shopee_csv_path,
+    get_video_output_dir,
     load_shopee_jobs,
     normalize_shopee_product_link,
     resolve_shopee_video_path,
@@ -347,6 +347,9 @@ class AutoPostTab:
         if not selected_path:
             return
 
+        active_profile = self.main_app.get_active_profile_name() if hasattr(self.main_app, "get_active_profile_name") else "Default"
+        profile_csv_paths = self.main_app.config.setdefault("shopee_csv_paths", {})
+        profile_csv_paths[active_profile] = selected_path
         self.main_app.config["shopee_csv_path"] = selected_path
         self.main_app.save_config()
         self._refresh_csv_path_label()
@@ -360,9 +363,10 @@ class AutoPostTab:
             messagebox.showwarning("Thiếu file", "Chưa có file CSV job Shopee. Bác render video trước đã.")
 
     def open_video_folder(self):
-        os.makedirs(VIDEO_OUTPUT_DIR, exist_ok=True)
+        video_output_dir = get_video_output_dir()
+        os.makedirs(video_output_dir, exist_ok=True)
         if os.name == "nt":
-            os.startfile(VIDEO_OUTPUT_DIR)
+            os.startfile(video_output_dir)
 
     def refresh_jobs_preview(self):
         self._refresh_csv_path_label()

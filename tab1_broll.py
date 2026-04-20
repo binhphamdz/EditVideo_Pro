@@ -57,13 +57,15 @@ class BRollTab:
         
         tk.Label(left_frame, text="📁 KHO PROJECT", font=("Arial", 12, "bold"), bg="#ffffff", fg="#2c3e50").pack(pady=10)
         
-        self.tree_proj = ttk.Treeview(left_frame, columns=("name",), show="headings", selectmode="browse")
+        self.tree_proj = ttk.Treeview(left_frame, columns=("name",), show="headings", selectmode="extended")
         self.tree_proj.heading("name", text="Tên Project")
         self.tree_proj.column("name", width=250, anchor="w")
         self.tree_proj.pack(fill="both", expand=True, padx=5, pady=5)
         self.tree_proj.bind("<<TreeviewSelect>>", self.on_select_project)
+        self.tree_proj.bind("<B1-Motion>", self._drag_select_projects)
         
         tk.Button(left_frame, text="➕ TẠO PROJECT TRỐNG", bg="#27ae60", fg="white", font=("Arial", 9, "bold"), pady=8, command=self.add_project_dialog).pack(fill="x", padx=5, pady=5)
+        tk.Button(left_frame, text="🚚 Chuyển Tài Khoản", bg="#2980b9", fg="white", font=("Arial", 9, "bold"), command=self.move_project_dialog).pack(fill="x", padx=5, pady=(0, 5))
         # ... (Dưới nút Xóa Project ở Cột Trái)
         tk.Button(left_frame, text="🗑️ Xóa Project", bg="#e74c3c", fg="white", font=("Arial", 9, "bold"), command=self.delete_project).pack(fill="x", padx=5, pady=(0, 5))
         
@@ -576,7 +578,19 @@ class BRollTab:
         self.update_missing_desc_count()
 
 
+    def _drag_select_projects(self, event):
+        item = self.tree_proj.identify_row(event.y)
+        if item:
+            self.tree_proj.selection_add(item)
+
+    def _get_selected_project_ids(self):
+        selected_ids = list(self.tree_proj.selection())
+        if selected_ids:
+            return selected_ids
+        return [self.current_project_id] if self.current_project_id else []
+
     def refresh_project_list(self):
+        previous_selection = set(self._get_selected_project_ids())
         for item in self.tree_proj.get_children(): self.tree_proj.delete(item)
         sorted_projects = sorted(self.main_app.projects.items(), key=lambda x: x[1]['created_at'], reverse=True)
         for pid, pdata in sorted_projects:
@@ -584,6 +598,10 @@ class BRollTab:
             # Hiện icon khóa nếu đang ẩn
             if pdata.get('status') == 'disabled': name = f"⏸️ {name} (Đã Ẩn)"
             self.tree_proj.insert("", "end", iid=pid, values=(name,))
+
+        valid_selection = [pid for pid in previous_selection if pid in self.main_app.projects]
+        if valid_selection:
+            self.tree_proj.selection_set(valid_selection)
 
     def _get_voice_status_store(self, project_id):
         return self.voice_status_by_project.setdefault(project_id, {})
@@ -676,6 +694,25 @@ class BRollTab:
             self.lbl_proj_name.config(text=new_name.strip())
             self.refresh_project_list()
             self.tree_proj.selection_set(self.current_project_id)
+
+    def _bulk_toggle_project_status(self):
+        selected_ids = self._get_selected_project_ids()
+        if not selected_ids:
+            return messagebox.showwarning("Chú ý", "Bác chưa chọn project nào để đóng băng / mở khóa!")
+
+        for pid in selected_ids:
+            if pid not in self.main_app.projects:
+                continue
+            proj = self.main_app.projects[pid]
+            current_status = proj.get("status", "active")
+            proj["status"] = "disabled" if current_status == "active" else "active"
+
+        self.main_app.save_projects()
+        self.refresh_project_list()
+        if self.current_project_id in self.main_app.projects:
+            self.tree_proj.selection_set(selected_ids)
+            self.tree_proj.focus(self.current_project_id)
+        self.main_app.tab2.update_combo_projects()
 
     def import_broll(self):
         if not self.current_project_id: return
@@ -1027,34 +1064,104 @@ class BRollTab:
         self.lbl_ref1.config(text=self._format_ref_image_name(ref1), fg="#27ae60" if ref1 else "gray")
         self.lbl_ref2.config(text=self._format_ref_image_name(ref2), fg="#27ae60" if ref2 else "gray")
 
-    def delete_project(self):
-        if not self.current_project_id: return
-        if messagebox.askyesno("Xóa", "Xóa toàn bộ Project và File trong thư mục Tool?"):
-            project_id = self.current_project_id
-            shutil.rmtree(self.main_app.get_proj_dir(project_id), ignore_errors=True)
-            del self.main_app.projects[project_id]
-            self.main_app.save_projects()
-            self.refresh_project_list()
+    def _reset_project_view(self, project_id=None):
+        if project_id:
             self._clear_ai_task_states_for_project(project_id)
             self.voice_status_by_project.pop(project_id, None)
-            
-            self.current_project_id = None
-            self.active_page = 1
-            self.trash_page = 1
-            self.filtered_act_files = []
-            self.filtered_tr_files = []
-            self.render_request_id += 1
-            self.lbl_proj_name.config(text="Chưa chọn Project nào")
-            for item in self.tree_voices.get_children(): self.tree_voices.delete(item)
-            for widget in self.frame_act.winfo_children(): widget.destroy()
-            for widget in self.frame_tr.winfo_children(): widget.destroy()
-            self.txt_context.delete("1.0", tk.END)
-            self.ent_product_name.delete(0, tk.END)
-            self.var_shopee_out_of_stock.set(False)
-            self._update_pagination_ui("active", 0, 1, 1)
-            self._update_pagination_ui("trash", 0, 1, 1)
-            for entry in self.product_link_entries:
-                entry.delete(0, tk.END)
+
+        self.current_project_id = None
+        self.active_page = 1
+        self.trash_page = 1
+        self.filtered_act_files = []
+        self.filtered_tr_files = []
+        self.render_request_id += 1
+        self.lbl_proj_name.config(text="Chưa chọn Project nào")
+        for item in self.tree_voices.get_children(): self.tree_voices.delete(item)
+        for widget in self.frame_act.winfo_children(): widget.destroy()
+        for widget in self.frame_tr.winfo_children(): widget.destroy()
+        self.txt_context.delete("1.0", tk.END)
+        self.ent_product_name.delete(0, tk.END)
+        self.var_shopee_out_of_stock.set(False)
+        self._update_pagination_ui("active", 0, 1, 1)
+        self._update_pagination_ui("trash", 0, 1, 1)
+        for entry in self.product_link_entries:
+            entry.delete(0, tk.END)
+        self.lbl_ref1.config(text="Chưa chọn", fg="gray")
+        self.lbl_ref2.config(text="Chưa chọn", fg="gray")
+
+    def move_project_dialog(self):
+        selected_ids = self._get_selected_project_ids()
+        if not selected_ids:
+            return messagebox.showwarning("Chú ý", "Bác phải chọn ít nhất 1 project trước đã!")
+
+        current_profile = self.main_app.get_active_profile_name()
+        available_profiles = [p for p in self.main_app.get_available_profiles() if p != current_profile]
+        if not available_profiles:
+            return messagebox.showwarning("Thiếu tài khoản", "Bác cần tạo ít nhất 2 tài khoản thì mới chuyển project được.")
+
+        popup = tk.Toplevel(self.parent)
+        popup.title("Chuyển Tài Khoản")
+        popup.configure(bg="#ffffff")
+        popup.resizable(False, False)
+        popup.transient(self.parent.winfo_toplevel())
+        popup.grab_set()
+
+        tk.Label(popup, text=f"Chuyển {len(selected_ids)} project đã chọn", bg="#ffffff", fg="#2c3e50", font=("Arial", 11, "bold")).pack(padx=18, pady=(16, 8))
+        tk.Label(popup, text=f"Đang ở tài khoản: {current_profile}", bg="#ffffff", fg="#7f8c8d", font=("Arial", 9)).pack(padx=18, pady=(0, 10))
+
+        target_var = tk.StringVar(value=available_profiles[0])
+        cmb_target = ttk.Combobox(popup, textvariable=target_var, state="readonly", values=available_profiles, width=28, font=("Arial", 10))
+        cmb_target.pack(padx=18, pady=(0, 14))
+
+        btn_frame = tk.Frame(popup, bg="#ffffff")
+        btn_frame.pack(pady=(0, 16))
+
+        def confirm_move():
+            target_profile = target_var.get().strip()
+            if not target_profile:
+                return messagebox.showwarning("Thiếu chọn", "Bác chưa chọn tài khoản đích.", parent=popup)
+
+            self.save_all_descriptions()
+            self.save_project_context()
+            self.save_product_info()
+
+            failed_messages = []
+            moved_count = 0
+            for pid in list(selected_ids):
+                ok, msg = self.main_app.move_project_to_profile(pid, target_profile)
+                if ok:
+                    moved_count += 1
+                else:
+                    failed_messages.append(msg)
+
+            popup.destroy()
+            self.refresh_project_list()
+            self._reset_project_view(self.current_project_id)
+            self.main_app.tab2.update_combo_projects()
+            if hasattr(self.main_app, 'tab11'):
+                self.main_app.tab11.refresh_jobs_preview()
+
+            if failed_messages:
+                summary = f"Đã chuyển {moved_count}/{len(selected_ids)} project.\n\n" + "\n".join(failed_messages[:6])
+                return messagebox.showwarning("Chuyển chưa trọn vẹn", summary)
+
+            messagebox.showinfo("Thành công", f"Đã chuyển thành công {moved_count} project sang tài khoản {target_profile}.")
+
+        tk.Button(btn_frame, text="Xác nhận", bg="#27ae60", fg="white", font=("Arial", 9, "bold"), width=12, command=confirm_move).pack(side="left", padx=5)
+        tk.Button(btn_frame, text="Hủy", bg="#95a5a6", fg="white", font=("Arial", 9, "bold"), width=10, command=popup.destroy).pack(side="left", padx=5)
+
+    def delete_project(self):
+        selected_ids = self._get_selected_project_ids()
+        if not selected_ids:
+            return
+        if messagebox.askyesno("Xóa", f"Xóa toàn bộ {len(selected_ids)} project đã chọn và file trong thư mục Tool?"):
+            for project_id in list(selected_ids):
+                shutil.rmtree(self.main_app.get_proj_dir(project_id), ignore_errors=True)
+                if project_id in self.main_app.projects:
+                    del self.main_app.projects[project_id]
+            self.main_app.save_projects()
+            self.refresh_project_list()
+            self._reset_project_view(self.current_project_id)
 
     def move_to_trash(self, vid_name, refresh=True):
         self.save_all_descriptions() 
@@ -1594,18 +1701,7 @@ class BRollTab:
     # [TÍNH NĂNG MỚI] ĐÓNG BĂNG VÀ ĐẾM MÔ TẢ
     # =======================================================
     def toggle_project_status(self):
-        if not self.current_project_id: return
-        proj = self.main_app.projects[self.current_project_id]
-        current_status = proj.get("status", "active")
-        
-        # Đảo ngược trạng thái
-        proj["status"] = "disabled" if current_status == "active" else "active"
-        self.main_app.save_projects()
-        
-        # Load lại giao diện
-        self.refresh_project_list()
-        self.tree_proj.selection_set(self.current_project_id)
-        self.main_app.tab2.update_combo_projects() # Cập nhật sang Tab 2
+        self._bulk_toggle_project_status()
 
     def update_missing_desc_count(self):
         """ Đếm xem còn bao nhiêu ô chưa gõ chữ """

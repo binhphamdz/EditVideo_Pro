@@ -147,6 +147,9 @@ class ManagerTab:
             
         # 2. CHỐT CHẶN TIÊU ĐỀ: Nếu file chưa có hoặc bị xóa trắng, tự động tạo file và nạp Tên Cột vào
         header = ["Ngày Tạo", "Tên Project", "File Voice", "Đường Dẫn", "Trạng Thái"]
+        excel_dir = os.path.dirname(EXCEL_LOG_FILE)
+        if excel_dir:
+            os.makedirs(excel_dir, exist_ok=True)
         if not os.path.exists(EXCEL_LOG_FILE) or os.path.getsize(EXCEL_LOG_FILE) == 0:
             with open(EXCEL_LOG_FILE, 'w', encoding='utf-8-sig', newline='') as f:
                 writer = csv.writer(f)

@@ -8,6 +8,7 @@ import requests
 from datetime import datetime
 import concurrent.futures
 import telebot
+from paths import DEFAULT_PROFILE, get_export_dir
 
 class TelegramBotManager:
     def __init__(self, main_app):
@@ -17,10 +18,70 @@ class TelegramBotManager:
         self.bot_sessions = {}
         self.session_lock = threading.Lock()  # 🔒 Thread-safety cho sessions
 
+    def get_active_profile_name(self):
+        try:
+            return self.main_app.get_active_profile_name()
+        except Exception:
+            return DEFAULT_PROFILE
+
+    def get_live_output_dir(self):
+        return get_export_dir(self.get_active_profile_name())
+
+    def get_available_profiles(self):
+        try:
+            return self.main_app.get_available_profiles()
+        except Exception:
+            return [self.get_active_profile_name()]
+
+    def switch_profile_from_bot(self, chat_id, target_profile):
+        target_profile = str(target_profile or "").strip()
+        if not target_profile:
+            if self.bot:
+                self.bot.send_message(chat_id, "❌ Bác chưa chọn tài khoản đích.")
+            return
+
+        def do_switch():
+            try:
+                current_profile = self.get_active_profile_name()
+                if target_profile == current_profile:
+                    self.bot.send_message(chat_id, f"ℹ️ Bot đang đứng sẵn ở tài khoản {current_profile} rồi sếp.")
+                    return
+
+                self.main_app.switch_profile(target_profile, show_notice=False)
+                self.clear_sessions()
+                self.bot.send_message(chat_id, f"✅ Đã chuyển bot sang tài khoản {target_profile} thành công.")
+            except Exception as exc:
+                self.bot.send_message(chat_id, f"❌ Không đổi được tài khoản: {exc}")
+
+        if hasattr(self.main_app, 'root') and self.main_app.root:
+            self.main_app.root.after(0, do_switch)
+        else:
+            do_switch()
+
+    def rename_profile_from_bot(self, chat_id, old_profile, new_profile_name):
+        def do_rename():
+            try:
+                ok, msg = self.main_app.rename_profile(old_profile, new_profile_name)
+                self.clear_sessions()
+                prefix = "✅" if ok else "❌"
+                self.bot.send_message(chat_id, f"{prefix} {msg}")
+            except Exception as exc:
+                self.bot.send_message(chat_id, f"❌ Không đổi tên được tài khoản: {exc}")
+
+        if hasattr(self.main_app, 'root') and self.main_app.root:
+            self.main_app.root.after(0, do_rename)
+        else:
+            do_rename()
+
+    def clear_sessions(self):
+        with self.session_lock:
+            self.bot_sessions.clear()
+
     def stop_telegram_bot(self):
         if self.bot:
             try: self.bot.stop_polling()
             except: pass
+        self.clear_sessions()
         self.bot_is_running = False
         self.main_app.bot_is_running = False 
 
@@ -88,8 +149,6 @@ class TelegramBotManager:
             print("⚠️ Bot đang chạy rồi, từ chối khởi động đúp!")
             return
 
-        from main import GLOBAL_OUT_DIR 
-        
         token = self.main_app.config.get("telegram_bot_token", "")
         if not token:
             print("⚠️ Chưa có Token Telegram, Bot đang ngủ.")
@@ -103,10 +162,14 @@ class TelegramBotManager:
         # =======================================================
         @self.bot.message_handler(commands=['help', 'start'])
         def send_help_menu(message):
+            current_profile = self.get_active_profile_name()
             help_text = (
                 "🤖 *TRỢ LÝ ĐẠO DIỄN AI KÍNH CHÀO SẾP!* 🎬\n\n"
+                f"🏛️ Tài khoản đang điều khiển: *{current_profile}*\n\n"
                 "Sếp cần em giúp gì nào? Đây là các lệnh để điều khiển dàn máy ở nhà:\n\n"
                 "📁 /projects - Xem danh sách và bật/tắt Project.\n"
+                "🏛️ /account - Đổi tài khoản làm việc ngay trên bot.\n"
+                "✏️ /renameaccount - Đổi tên tài khoản hiện tại.\n"
                 "🚀 /menu (hoặc /render) - Chọn 1 dự án để lên đơn làm video.\n"
                 "📚 /multimenu - Chọn NHIỀU dự án cùng lúc để bốc Voice tự động.\n"
                 "🎲 /autobatch - Bốc random TẤT CẢ dự án mỗi nơi vài Voice.\n"
@@ -126,15 +189,84 @@ class TelegramBotManager:
             if not self.main_app.projects:
                 return self.bot.send_message(message.chat.id, "❌ Kho chưa có Project nào!")
 
+            current_profile = self.get_active_profile_name()
             sorted_projects = sorted(self.main_app.projects.items(), key=lambda x: x[1]['created_at'], reverse=True)
-            msg = "📁 DANH SÁCH PROJECT:\n\n"
+            msg = f"📁 DANH SÁCH PROJECT - TK {current_profile}:\n\n"
             for idx, (pid, pdata) in enumerate(sorted_projects, 1):
                 status = "🟢 Đang mở" if pdata.get('status', 'active') == 'active' else "🔴 Đã Đóng Băng"
                 msg += f"{idx}. {pdata['name']} [{status}]\n"
 
             msg += "\n👉 Nhập MỘT SỐ THỨ TỰ (VD: 1, 2 hoặc 3) để Đóng/Mở băng. (Nhập chữ bất kỳ để hủy)"
             sent_msg = self.bot.send_message(message.chat.id, msg)
-            self.bot.register_next_step_handler(sent_msg, process_toggle_step, sorted_projects)
+            self.bot.register_next_step_handler(sent_msg, process_toggle_step, sorted_projects, current_profile)
+
+        @self.bot.message_handler(commands=['account', 'accounts', 'profile', 'taikhoan'])
+        def handle_account_switch(message):
+            chat_id = message.chat.id
+            profiles = self.get_available_profiles()
+            current_profile = self.get_active_profile_name()
+
+            if not profiles:
+                return self.bot.send_message(chat_id, "❌ Chưa có tài khoản nào để đổi sếp ơi.")
+
+            msg = f"🏛️ TÀI KHOẢN HIỆN TẠI: {current_profile}\n\n"
+            msg += "Danh sách tài khoản đang có:\n"
+            for idx, name in enumerate(profiles, 1):
+                icon = "✅" if name == current_profile else "▫️"
+                msg += f"{idx}. {icon} {name}\n"
+            msg += "\n👉 Sếp nhắn số thứ tự hoặc gõ đúng tên tài khoản để đổi nhé."
+
+            with self.session_lock:
+                self.bot_sessions[chat_id] = {'profile_options': profiles}
+
+            sent_msg = self.bot.send_message(chat_id, msg)
+            self.bot.register_next_step_handler(sent_msg, process_account_switch)
+
+        def process_account_switch(message):
+            chat_id = message.chat.id
+            text = message.text.strip()
+            with self.session_lock:
+                session = self.bot_sessions.get(chat_id)
+
+            if not session or 'profile_options' not in session:
+                return self.bot.send_message(chat_id, "❌ Phiên chọn tài khoản đã hết hạn, sếp gõ lại lệnh giúp em nhé.")
+
+            profiles = session.get('profile_options', [])
+            target_profile = None
+
+            if text.isdigit():
+                idx = int(text) - 1
+                if 0 <= idx < len(profiles):
+                    target_profile = profiles[idx]
+            else:
+                for name in profiles:
+                    if name.casefold() == text.casefold():
+                        target_profile = name
+                        break
+
+            with self.session_lock:
+                self.bot_sessions.pop(chat_id, None)
+
+            if not target_profile:
+                return self.bot.send_message(chat_id, "❌ Em không thấy tài khoản đó. Bác gõ lại lệnh rồi chọn lại giúp em nhé.")
+
+            self.bot.send_message(chat_id, f"⏳ Đang chuyển sang tài khoản {target_profile}...")
+            self.switch_profile_from_bot(chat_id, target_profile)
+
+        @self.bot.message_handler(commands=['renameaccount', 'renameprofile', 'doiten'])
+        def handle_account_rename(message):
+            chat_id = message.chat.id
+            current_profile = self.get_active_profile_name()
+            sent_msg = self.bot.send_message(chat_id, f"✏️ Tài khoản hiện tại là: {current_profile}\n\n👉 Sếp nhắn tên mới để em đổi ngay nhé.")
+            self.bot.register_next_step_handler(sent_msg, process_account_rename, current_profile)
+
+        def process_account_rename(message, old_profile):
+            chat_id = message.chat.id
+            new_profile_name = message.text.strip()
+            if not new_profile_name:
+                return self.bot.send_message(chat_id, "❌ Tên mới đang bị trống, sếp gõ lại giúp em nhé.")
+            self.bot.send_message(chat_id, f"⏳ Đang đổi tên tài khoản {old_profile}...")
+            self.rename_profile_from_bot(chat_id, old_profile, new_profile_name)
 
         @self.bot.message_handler(commands=['web', 'server'])
         def handle_web_server(message):
@@ -148,7 +280,7 @@ class TelegramBotManager:
                 
             self.main_app.root.after(0, lambda: self.main_app.tab4.toggle_web_server(bot=self.bot, chat_id=chat_id))
 
-        def process_toggle_step(message, sorted_projects):
+        def process_toggle_step(message, sorted_projects, profile_name):
             text = message.text.strip()
             if not text.isdigit():
                 return self.bot.send_message(message.chat.id, "✅ Đã hủy thao tác.")
@@ -160,14 +292,21 @@ class TelegramBotManager:
             target_pid, pdata = sorted_projects[idx]
             current = pdata.get('status', 'active')
             new_status = 'disabled' if current == 'active' else 'active'
-            self.main_app.projects[target_pid]['status'] = new_status
-            self.main_app.save_projects()
 
-            self.main_app.root.after(0, self.main_app.tab1.refresh_project_list)
-            self.main_app.root.after(0, self.main_app.tab2.update_combo_projects)
+            if profile_name == self.get_active_profile_name():
+                if target_pid in self.main_app.projects:
+                    self.main_app.projects[target_pid]['status'] = new_status
+                    self.main_app.save_projects()
+                    self.main_app.root.after(0, self.main_app.tab1.refresh_project_list)
+                    self.main_app.root.after(0, self.main_app.tab2.update_combo_projects)
+            else:
+                projects_data = self.main_app.load_projects_for_profile(profile_name)
+                if target_pid in projects_data:
+                    projects_data[target_pid]['status'] = new_status
+                    self.main_app.save_projects_for_profile(profile_name, projects_data)
 
             state_str = "🟢 ĐÃ MỞ KHÓA" if new_status == 'active' else "🔴 ĐÃ ĐÓNG BĂNG"
-            self.bot.send_message(message.chat.id, f"✅ {state_str} project:\n👉 {pdata['name']}")
+            self.bot.send_message(message.chat.id, f"✅ {state_str} project trong tài khoản {profile_name}:\n👉 {pdata['name']}")
 
 
         # =======================================================
@@ -177,15 +316,17 @@ class TelegramBotManager:
         def handle_view_files(message):
             chat_id = message.chat.id
             self.bot.send_chat_action(chat_id, 'typing')
-            if not os.path.exists(GLOBAL_OUT_DIR): return self.bot.send_message(chat_id, "❌ Em không tìm thấy thư mục kho hàng!")
+            output_dir = self.get_live_output_dir()
+            current_profile = self.get_active_profile_name()
+            if not os.path.exists(output_dir): return self.bot.send_message(chat_id, "❌ Em không tìm thấy thư mục kho hàng!")
 
-            video_files = [f for f in os.listdir(GLOBAL_OUT_DIR) if f.lower().endswith('.mp4')]
-            if not video_files: return self.bot.send_message(chat_id, "🏜️ Kho hàng đang trống trơn sếp ạ!")
+            video_files = [f for f in os.listdir(output_dir) if f.lower().endswith('.mp4')]
+            if not video_files: return self.bot.send_message(chat_id, f"🏜️ Kho hàng của tài khoản {current_profile} đang trống trơn sếp ạ!")
 
-            video_files.sort(key=lambda x: os.path.getmtime(os.path.join(GLOBAL_OUT_DIR, x)), reverse=True)
+            video_files.sort(key=lambda x: os.path.getmtime(os.path.join(output_dir, x)), reverse=True)
             _, _, _, _, raw_lines = self.get_bot_stats()
             
-            msg = f"📊 **KHO THÀNH PHẨM ({len(video_files)} video):**\n\n"
+            msg = f"📊 **KHO THÀNH PHẨM - {current_profile} ({len(video_files)} video):**\n\n"
             file_map = []
             
             for i, f_name in enumerate(video_files[:15], 1): 
@@ -203,7 +344,7 @@ class TelegramBotManager:
 
             msg += "\n👉 Sếp muốn ném file nào vào iCloud thì **nhắn lại các số thứ tự (cách nhau bằng dấu phẩy)** nhé (VD: 1,3,5)!"
             with self.session_lock:
-                self.bot_sessions[chat_id] = {'file_map': file_map}
+                self.bot_sessions[chat_id] = {'file_map': file_map, 'output_dir': output_dir, 'profile_name': current_profile}
             msg_sent = self.bot.send_message(chat_id, msg, parse_mode="Markdown")
             self.bot.register_next_step_handler(msg_sent, process_file_delivery)
 
@@ -236,8 +377,9 @@ class TelegramBotManager:
                 os.makedirs(target_dir, exist_ok=True)
                 
                 success_count = 0
+                output_dir = session.get('output_dir', self.get_live_output_dir())
                 for target_file in target_files:
-                    file_path = os.path.join(GLOBAL_OUT_DIR, target_file)
+                    file_path = os.path.join(output_dir, target_file)
                     if os.path.exists(file_path):
                         target_path = os.path.join(target_dir, f"[{datetime.now().strftime('%Y%m%d_%H%M')}]_{target_file}")
                         shutil.copy2(file_path, target_path)
@@ -315,14 +457,15 @@ class TelegramBotManager:
             chat_id = message.chat.id
             if not self.main_app.projects: return self.bot.send_message(chat_id, "❌ Kho trống trơn sếp ơi!")
             
+            current_profile = self.get_active_profile_name()
             proj_list = [(pid, p.get('name')) for pid, p in self.main_app.projects.items()]
-            msg = "📁 **CHỌN NHIỀU DỰ ÁN ĐỂ CHẠY TỰ ĐỘNG:**\n\n"
+            msg = f"📁 **CHỌN NHIỀU DỰ ÁN ĐỂ CHẠY TỰ ĐỘNG - {current_profile}:**\n\n"
             for i, (p, n) in enumerate(proj_list, 1):
                 msg += f" {i}. {n}\n"
             msg += "\n👇 Sếp nhắn **các số thứ tự** cách nhau bằng dấu phẩy nhé (VD: 1,3,5):"
             
             with self.session_lock:
-                self.bot_sessions[chat_id] = {'proj_list': proj_list}
+                self.bot_sessions[chat_id] = {'proj_list': proj_list, 'profile_name': current_profile}
             msg_sent = self.bot.send_message(chat_id, msg, parse_mode="Markdown")
             self.bot.register_next_step_handler(msg_sent, process_multi_project_choice)
 
@@ -349,8 +492,9 @@ class TelegramBotManager:
             render_queue = []
             msg_log = "🎲 **Báo cáo kết quả đi chợ (Ưu tiên Voice ít dùng):**\n"
 
+            profile_name = sess.get('profile_name', self.get_active_profile_name())
             for pid, proj_name in selected_projects:
-                pdir = self.main_app.get_proj_dir(pid)
+                pdir = self.main_app.get_proj_dir(pid, profile_name)
                 vdir = os.path.join(pdir, "Voices")
                 if os.path.exists(vdir):
                     voices = [f for f in os.listdir(vdir) if f.lower().endswith(('.mp3', '.wav'))]
@@ -411,6 +555,10 @@ class TelegramBotManager:
         def natural_files(message): handle_view_files(message)
         @self.bot.message_handler(func=lambda message: not message.text.startswith('/') and any(kw in message.text.lower() for kw in ['đồng bộ', 'đẩy lên', 'sync']))
         def natural_icloud(message): handle_sync_icloud(message)
+        @self.bot.message_handler(func=lambda message: not message.text.startswith('/') and any(kw in message.text.lower() for kw in ['đổi tài khoản', 'chuyển tài khoản', 'đổi profile']))
+        def natural_account(message): handle_account_switch(message)
+        @self.bot.message_handler(func=lambda message: not message.text.startswith('/') and any(kw in message.text.lower() for kw in ['đổi tên tài khoản', 'sửa tên tài khoản', 'đổi tên profile']))
+        def natural_rename_account(message): handle_account_rename(message)
         @self.bot.message_handler(func=lambda message: not message.text.startswith('/') and any(kw in message.text.lower() for kw in ['chạy random', 'bốc ngẫu nhiên', 'chạy tự động']))
         def natural_autobatch(message): handle_auto_batch(message)
         @self.bot.message_handler(func=lambda message: not message.text.startswith('/') and any(kw in message.text.lower() for kw in ['chạy nhiều', 'chọn nhiều', 'chạy lô']))
@@ -453,10 +601,11 @@ class TelegramBotManager:
         def handle_menu(message):
             chat_id = message.chat.id
             if not self.main_app.projects: return self.bot.send_message(chat_id, "Kho trống trơn sếp ơi!")
+            current_profile = self.get_active_profile_name()
             proj_list = [(pid, p.get('name')) for pid, p in self.main_app.projects.items()]
-            msg = "📁 **Dự án nhà mình:**\n" + "".join([f" {i}. {n}\n" for i, (p, n) in enumerate(proj_list, 1)]) + "\n👇 Sếp nhắn **số thứ tự** Project nhé:"
+            msg = f"📁 **Dự án nhà mình - {current_profile}:**\n" + "".join([f" {i}. {n}\n" for i, (p, n) in enumerate(proj_list, 1)]) + "\n👇 Sếp nhắn **số thứ tự** Project nhé:"
             with self.session_lock:
-                self.bot_sessions[chat_id] = {'proj_list': proj_list}
+                self.bot_sessions[chat_id] = {'proj_list': proj_list, 'profile_name': current_profile}
             self.bot.register_next_step_handler(self.bot.send_message(chat_id, msg, parse_mode="Markdown"), process_project_choice)
 
         def process_project_choice(message):
@@ -476,7 +625,8 @@ class TelegramBotManager:
                 print(f"⚠️ Lỗi process_project_choice: {e}")
                 return self.bot.send_message(chat_id, f"❌ Lỗi: {str(e)[:50]}")
             
-            pdir = self.main_app.get_proj_dir(pid); vdir = os.path.join(pdir, "Voices")
+            profile_name = sess.get('profile_name', self.get_active_profile_name())
+            pdir = self.main_app.get_proj_dir(pid, profile_name); vdir = os.path.join(pdir, "Voices")
             voices = [f for f in os.listdir(vdir) if f.lower().endswith(('.mp3', '.wav'))] if os.path.exists(vdir) else []
             if not voices: return self.bot.send_message(chat_id, f"Không có voice nào trong {proj_name}!")
             
