@@ -1,0 +1,158 @@
+<section id="tab-scenes" class="tab-panel">
+    <div class="card">
+        <h3>🎞️ Quản lý cảnh trám chi tiết</h3>
+        <div class="section-sub">Bê toàn bộ luồng tab 1 lên web: nạp cảnh, tìm kiếm, mô tả, AI soi, thùng rác, voice, ảnh mẫu và thông tin sản phẩm.</div>
+
+        <div class="card" style="box-shadow:none; margin-top:14px;">
+            <div class="scene-panel-head">
+                <div>
+                    <h3>📁 Quản lý project của Tab 1</h3>
+                    <div class="section-sub">Khôi phục lại khu quản lý project để bác tạo mới, chọn nhanh, đổi tên, đóng băng và xóa trực tiếp ngay trong tab này.</div>
+                </div>
+                <div class="project-card-actions">
+                    <button class="success" onclick="createProjectWeb()">➕ Tạo project</button>
+                    <button onclick="renameCurrentProjectWeb()">✏️ Đổi tên</button>
+                    <button class="warn" onclick="toggleCurrentProjectStatusWeb()">⏸️ Đóng băng / mở khóa</button>
+                    {% if is_admin %}
+                    <select id="projectMoveTarget">
+                        <option value="">Chuyển sang tài khoản...</option>
+                    </select>
+                    <button onclick="moveCurrentProjectWeb()">🚚 Chuyển tài khoản</button>
+                    {% endif %}
+                    <button class="danger" onclick="deleteCurrentProjectWeb()">🗑️ Xóa project</button>
+                </div>
+            </div>
+            <div id="sceneProjectManagerList" class="project-manager-grid">
+                <div class="scene-empty">Đang nạp danh sách project...</div>
+            </div>
+        </div>
+
+        <div class="scene-toolbar-panel">
+            <div class="scene-toolbar-row">
+                <label for="sceneProjectSelect">Project:</label>
+                <select id="sceneProjectSelect" onchange="onSceneProjectChange()"></select>
+                <input id="sceneSearchInput" class="grow" type="text" placeholder="Tìm tên cảnh..." onkeyup="queueSceneSearch()" />
+                <button id="brollUploadBtn" class="primary" onclick="openFilePicker('brollUploadInput')">📥 Nạp cảnh trám</button>
+                <button id="voiceUploadBtn" class="success" onclick="openFilePicker('voiceUploadInput')">🎙️ Thêm voice</button>
+                <button class="warn" onclick="startSceneAiAll()">🧠 AI điền cảnh trống</button>
+                <button onclick="loadSceneManager()">🔄 Làm mới cảnh</button>
+            </div>
+            <div id="brollUploadProgress" class="scene-toolbar-row" style="display: none; padding: 8px 0;">
+                <div style="flex: 1; background: #e0e0e0; border-radius: 8px; overflow: hidden; height: 24px; position: relative;">
+                    <div id="brollUploadProgressBar" style="height: 100%; background: linear-gradient(90deg, #4caf50, #66bb6a); width: 0%; transition: width 0.3s ease;"></div>
+                    <span id="brollUploadProgressText" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-weight: bold; color: #333; font-size: 12px;">0%</span>
+                </div>
+            </div>
+            <div id="voiceUploadProgress" class="scene-toolbar-row" style="display: none; padding: 8px 0;">
+                <div style="flex: 1; background: #e0e0e0; border-radius: 8px; overflow: hidden; height: 24px; position: relative;">
+                    <div id="voiceUploadProgressBar" style="height: 100%; background: linear-gradient(90deg, #2196f3, #42a5f5); width: 0%; transition: width 0.3s ease;"></div>
+                    <span id="voiceUploadProgressText" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-weight: bold; color: #333; font-size: 12px;">0%</span>
+                </div>
+            </div>
+            <div class="scene-toolbar-row">
+                <span id="sceneActiveCount" class="badge badge-info">0 cảnh dùng</span>
+                <span id="sceneTrashCount" class="badge badge-danger">0 cảnh rác</span>
+                <span id="sceneMissingBadge" class="badge badge-warn">Đang tải...</span>
+            </div>
+        </div>
+
+        <div class="scene-subnav">
+            <button id="sceneSubtabMedia" class="active" onclick="showSceneSubtab('media')">🎬 Cảnh trám</button>
+            <button id="sceneSubtabVoice" onclick="showSceneSubtab('voice')">🎙️ Kho voice</button>
+            <button id="sceneSubtabSettings" onclick="showSceneSubtab('settings')">📝 Thông tin sản phẩm</button>
+        </div>
+
+        <div id="sceneSubpanelMedia" class="scene-subpanel active">
+            <div class="card scene-list-shell" style="box-shadow:none;">
+                <div class="scene-panel-head">
+                    <div>
+                        <h3>🎬 Danh sách cảnh theo trang</h3>
+                        <div class="section-sub">Khung xem dọc 9:16, chia trang rõ ràng để nhìn chuyên nghiệp và đỡ rối mắt.</div>
+                    </div>
+                    <div class="scene-pagination">
+                        <label for="scenePageSize">Hiển thị:</label>
+                        <select id="scenePageSize" onchange="onScenePageSizeChange()">
+                            <option value="6">6</option>
+                            <option value="8" selected>8</option>
+                            <option value="12">12</option>
+                            <option value="16">16</option>
+                        </select>
+                        <button id="scenePrevBtn" onclick="changeScenePage(-1)">⬅ Trang trước</button>
+                        <span id="scenePageInfo" class="scene-page-info">Trang 1 / 1</span>
+                        <button id="sceneNextBtn" onclick="changeScenePage(1)">Trang sau ➡</button>
+                    </div>
+                </div>
+
+                <div class="scene-switcher">
+                    <button id="sceneActiveBtn" class="primary active" onclick="switchSceneView('active')">✅ Cảnh đang dùng</button>
+                    <button id="sceneTrashBtn" onclick="switchSceneView('trash')">🗑️ Thùng rác</button>
+                </div>
+
+                <div class="scene-bulkbar">
+                    <button onclick="selectAllScenes(true)">☑ Chọn tất cả</button>
+                    <button onclick="selectAllScenes(false)">☐ Bỏ chọn</button>
+                    <button id="sceneBulkToggleBtn" class="warn" onclick="runSceneBulkAction(currentSceneView === 'trash' ? 'restore' : 'trash')">🗑️ Bỏ vào thùng rác</button>
+                    <button class="danger" onclick="runSceneBulkAction('delete')">❌ Xóa vĩnh viễn</button>
+                </div>
+
+                <div id="sceneActivePanel" class="scene-panel active">
+                    <div id="sceneActiveList" class="scene-grid"></div>
+                </div>
+                <div id="sceneTrashPanel" class="scene-panel">
+                    <div id="sceneTrashList" class="scene-grid"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="sceneSubpanelVoice" class="scene-subpanel">
+            <div class="scene-single-col">
+                <div class="card" style="box-shadow:none;">
+                    <h3>🎙️ Danh sách voice trong project</h3>
+                    <div class="section-sub">Khu riêng cho voice để bác nghe thử, kiểm tra trạng thái và xóa nhanh mà không bị lẫn với phần cảnh.</div>
+                    <div id="sceneVoiceList" class="voice-list-wrap"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="sceneSubpanelSettings" class="scene-subpanel">
+            <div class="scene-single-col">
+                <div class="card" style="box-shadow:none;">
+                    <h3>📝 Bối cảnh và thông tin sản phẩm</h3>
+                    <div class="section-sub">Tách riêng phần cấu hình sản phẩm để khu làm việc chính gọn mắt hơn.</div>
+                    <div class="settings-grid">
+                        <div>
+                            <label for="sceneContext">Bối cảnh sản phẩm</label>
+                            <textarea id="sceneContext" placeholder="Nhập bối cảnh, cách dùng, điểm nổi bật..."></textarea>
+                        </div>
+                        <div>
+                            <label for="sceneProductName">Tên sản phẩm</label>
+                            <input id="sceneProductName" type="text" placeholder="Nhập tên sản phẩm" />
+                            <label class="small-check"><input id="sceneOutOfStock" type="checkbox" /> Hết hàng, không đưa vào job Shopee</label>
+                        </div>
+                    </div>
+
+                    <div class="link-grid">
+                        <input id="sceneLink1" type="text" placeholder="Link sản phẩm 1" />
+                        <input id="sceneLink2" type="text" placeholder="Link sản phẩm 2" />
+                        <input id="sceneLink3" type="text" placeholder="Link sản phẩm 3" />
+                        <input id="sceneLink4" type="text" placeholder="Link sản phẩm 4" />
+                        <input id="sceneLink5" type="text" placeholder="Link sản phẩm 5" />
+                        <input id="sceneLink6" type="text" placeholder="Link sản phẩm 6" />
+                    </div>
+
+                    <div class="ref-row">
+                        <button onclick="openFilePicker('refImg1Input')">🖼️ Ảnh mẫu 1</button>
+                        <span id="refImg1Name" class="ref-name">Chưa chọn</span>
+                        <button onclick="openFilePicker('refImg2Input')">🖼️ Ảnh mẫu 2</button>
+                        <span id="refImg2Name" class="ref-name">Chưa chọn</span>
+                        <button class="danger" onclick="clearSceneRefs()">Xóa ảnh mẫu</button>
+                    </div>
+
+                    <div class="toolbar-2">
+                        <button class="primary" onclick="saveSceneSettings()">💾 Lưu thông tin cảnh trám</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>

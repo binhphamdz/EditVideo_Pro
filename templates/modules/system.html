@@ -1,0 +1,93 @@
+<section id="tab-system" class="tab-panel">
+    <div class="card">
+        <h3>⚙️ Cấu hình hệ thống</h3>
+        <div class="section-sub">Khu riêng để quản lý key, font, chế độ bóc băng và theo dõi toàn bộ trạng thái vận hành của hệ thống.</div>
+
+        <div class="system-grid">
+            <div class="card" style="box-shadow:none;">
+                <h3>🔐 API và tài nguyên dùng chung</h3>
+                <div class="control-grid">
+                    <div>
+                        <label for="systemGroqKey">Groq Key</label>
+                        <input id="systemGroqKey" type="text" placeholder="Nhập Groq key hoặc để trống nếu đã lưu" />
+                        <div id="systemGroqStatus" class="muted" style="font-size:11px;margin-top:4px;"></div>
+                    </div>
+                    <div>
+                        <label for="systemKieKey">Kie Key (ưu tiên)</label>
+                        <input id="systemKieKey" type="text" placeholder="Nhập Kie key hoặc để trống nếu đã lưu" />
+                        <div id="systemKieStatus" class="muted" style="font-size:11px;margin-top:4px;"></div>
+                    </div>
+                    <div>
+                        <label for="systemOpenRouterKey">OpenRouter Key (fallback)</label>
+                        <input id="systemOpenRouterKey" type="text" placeholder="Nhập OpenRouter key hoặc để trống nếu đã lưu" />
+                        <div id="systemOpenRouterStatus" class="muted" style="font-size:11px;margin-top:4px;"></div>
+                    </div>
+                    <div>
+                        <label for="systemAiProvider">AI Provider (Nhà cung cấp AI)</label>
+                        <select id="systemAiProvider">
+                            <option value="auto">Tự động (Kie → OpenRouter)</option>
+                            <option value="kie">Chỉ dùng Kie.ai</option>
+                            <option value="openrouter">Chỉ dùng OpenRouter</option>
+                        </select>
+                        <div class="muted" style="font-size:11px;margin-top:4px;">Chọn provider ưu tiên cho toàn bộ tool.</div>
+                    </div>
+                    <div>
+                        <label for="systemAiModel">AI Model</label>
+                        <select id="systemAiModel">
+                            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                            <option value="gemini-3-flash">Gemini 3 Flash (Kie.ai)</option>
+                            <option value="google/gemma-4-31b-it:free">🆓 Gemma 4 31B (Free)</option>
+                            <option value="google/gemini-flash-1.5-8b">Gemini Flash 1.5 8B</option>
+                            <option value="openai/gpt-4o-mini">GPT-4o Mini</option>
+                            <option value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet</option>
+                        </select>
+                        <div class="muted" style="font-size:11px;margin-top:4px;">Kie.ai hỗ trợ Gemini 2.5 Flash & 3 Flash. Model Free cần OpenRouter.</div>
+                    </div>
+                    <div>
+                        <label for="systemFontPath">Font bìa mặc định</label>
+                        <input id="systemFontPath" type="text" placeholder="Đường dẫn font" />
+                    </div>
+                    <div>
+                        <label for="systemBocBangMode">Chế độ bóc băng</label>
+                        <select id="systemBocBangMode">
+                            <option value="groq">Groq · nhanh</option>
+                            <option value="ohfree">OhFree · chuẩn</option>
+                        </select>
+                    </div>
+                    {% if is_admin %}
+                    <div>
+                        <label for="systemRenderThreads">Số luồng render đồng thời</label>
+                        <input id="systemRenderThreads" type="number" min="1" max="16" value="1" />
+                        <div class="muted" style="font-size:11px;margin-top:4px;">Máy mạnh nên đặt 4-8. Chỉ admin thay đổi được.</div>
+                    </div>
+                    {% endif %}
+                </div>
+                <div class="toolbar-2">
+                    <button class="primary" onclick="saveSystemConfig()">💾 Lưu cấu hình hệ thống</button>
+                    <button onclick="loadSystemConfig()">🔄 Tải lại cấu hình</button>
+                </div>
+                <div id="systemConfigSummary" class="scene-empty" style="margin-top:12px;">Chưa nạp cấu hình hệ thống.</div>
+            </div>
+
+            <div class="card" style="box-shadow:none;">
+                <h3>📊 Trạng thái nhanh</h3>
+                <div class="system-status-grid">
+                    <div class="system-kpi"><span class="muted">Tài khoản đang dùng</span><strong id="systemProfileName">-</strong></div>
+                    <div class="system-kpi"><span class="muted">Tổng project</span><strong id="systemProjectTotal">0</strong></div>
+                    <div class="system-kpi"><span class="muted">Video đã xuất</span><strong id="systemVideoTotal">0</strong></div>
+                    <div class="system-kpi"><span class="muted">Job chờ đăng</span><strong id="systemPendingTotal">0</strong></div>
+                </div>
+                <div class="scene-empty" id="systemHealthNote" style="margin-top:12px;">Hệ thống đã tách riêng phần cấu hình để thao tác an toàn và gọn hơn.</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+        <h3>🧠 Job nền của hệ thống</h3>
+        <div class="section-sub">Danh sách các job render hoặc autopost đang chạy ở nền.</div>
+        <table>
+            <thead><tr><th>Mã job</th><th>Loại</th><th>Tài khoản</th><th>Tiến trình</th><th>Trạng thái</th><th>Thao tác</th></tr></thead>
+            <tbody id="systemJobTable"></tbody>
+        </table>
+    </div>
+</section>

@@ -9,6 +9,182 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from ai_model_registry import (
+    DEFAULT_AI_MODEL,
+    DEFAULT_AI_PROVIDER,
+    get_kie_endpoint,
+    normalize_ai_model,
+    normalize_ai_provider,
+    supports_provider,
+    to_openrouter_model,
+)
+
+# ========================================================================
+# ✨ AI PROVIDER WITH AUTO-FALLBACK (kie.ai → openrouter.ai)
+# ========================================================================
+def _call_ai_api_with_fallback(model, messages, temperature, config, log_cb, voice_name, retry_delays=[3, 10, 30]):
+    """
+    Gọi AI API với cơ chế fallback từ kie.ai sang openrouter.ai
+    
+    Args:
+        model: Tên model (vd: "gemini-2.5-flash" hoặc "google/gemma-4-31b-it:free")
+        messages: List of message dicts [{role, content}]
+        temperature: Temperature value
+        config: Dict cấu hình chứa kie_key, openrouter_key, ai_model
+        log_cb: Callback function để log
+        voice_name: Tên voice cho logging
+        retry_delays: List delay giữa các lần retry
+    
+    Returns:
+        str: Content từ AI response
+    
+    Raises:
+        Exception: Nếu cả 2 provider đều thất bại
+    """
+    kie_key = str(config.get('kie_key') or '').strip()
+    openrouter_key = str(config.get('openrouter_key') or '').strip()
+    
+    # Lấy provider preference và model từ config theo registry chung
+    ai_provider = normalize_ai_provider(str(config.get('ai_provider') or DEFAULT_AI_PROVIDER).strip().lower())
+    selected_model = normalize_ai_model(str(config.get('ai_model') or model or DEFAULT_AI_MODEL).strip(), ai_provider)
+    
+    # Log để debug
+    if log_cb:
+        log_cb(f"🔧 AI Config: Provider={ai_provider}, Model={selected_model}")
+    
+    # Danh sách providers để thử (theo thứ tự ưu tiên)
+    providers = []
+    
+    # Build providers list dựa theo user preference
+    if ai_provider == 'auto':
+        # Chế độ auto: Kie.ai -> OpenRouter fallback
+        if kie_key and kie_key.lower() != 'dummy' and supports_provider(selected_model, 'kie'):
+            kie_endpoint = get_kie_endpoint(selected_model)
+            if kie_endpoint:
+                providers.append({
+                    'name': 'kie.ai',
+                    'url': kie_endpoint,
+                    'headers': {
+                        'Authorization': f'Bearer {kie_key}',
+                        'Content-Type': 'application/json'
+                    },
+                    'model': selected_model
+                })
+        if openrouter_key and openrouter_key.lower() != 'dummy' and supports_provider(selected_model, 'openrouter'):
+            providers.append({
+                'name': 'openrouter.ai',
+                'url': 'https://openrouter.ai/api/v1/chat/completions',
+                'headers': {
+                    'Authorization': f'Bearer {openrouter_key}',
+                    'Content-Type': 'application/json',
+                    'HTTP-Referer': 'https://editvideopro.online',
+                    'X-OpenRouter-Title': 'EditVideo Pro'
+                },
+                'model': to_openrouter_model(selected_model)
+            })
+    elif ai_provider == 'kie':
+        # Chỉ dùng Kie.ai
+        if kie_key and kie_key.lower() != 'dummy' and supports_provider(selected_model, 'kie'):
+            kie_endpoint = get_kie_endpoint(selected_model)
+            if kie_endpoint:
+                providers.append({
+                    'name': 'kie.ai',
+                    'url': kie_endpoint,
+                    'headers': {
+                        'Authorization': f'Bearer {kie_key}',
+                        'Content-Type': 'application/json'
+                    },
+                    'model': selected_model
+                })
+    elif ai_provider == 'openrouter':
+        # Chỉ dùng OpenRouter
+        if openrouter_key and openrouter_key.lower() != 'dummy' and supports_provider(selected_model, 'openrouter'):
+            providers.append({
+                'name': 'openrouter.ai',
+                'url': 'https://openrouter.ai/api/v1/chat/completions',
+                'headers': {
+                    'Authorization': f'Bearer {openrouter_key}',
+                    'Content-Type': 'application/json',
+                    'HTTP-Referer': 'https://editvideopro.online',
+                    'X-OpenRouter-Title': 'EditVideo Pro'
+                },
+                'model': to_openrouter_model(selected_model)
+            })
+    
+    if not providers:
+        raise Exception(f"Không thể chạy model '{selected_model}' với provider '{ai_provider}'. Kiểm tra lại API key hoặc chọn model phù hợp.")
+    
+    last_error = None
+    
+    # Thử từng provider
+    for provider_idx, provider in enumerate(providers):
+        provider_name = provider['name']
+        
+        # Retry logic cho mỗi provider
+        for attempt in range(3):
+            try:
+                if attempt > 0:
+                    delay = retry_delays[attempt - 1]
+                    log_cb(f"[{voice_name}] ⏳ [{provider_name}] Đợi {delay}s trước khi thử lại...")
+                    time.sleep(delay)
+                
+                payload = {
+                    'model': provider['model'],
+                    'messages': messages,
+                    'temperature': temperature
+                }
+                
+                res = requests.post(provider['url'], headers=provider['headers'], json=payload, timeout=180)
+                
+                # Kiểm tra response có phải JSON không
+                try:
+                    resp_data = res.json()
+                except:
+                    raise Exception(f"API trả về HTML/text thay vì JSON (bị block/cloudflare). Response: {res.text[:200]}")
+                
+                # Kiểm tra lỗi maintenance từ server
+                if resp_data.get('code') == 500:
+                    maintenance_msg = resp_data.get('msg', 'Server error')
+                    raise Exception(f"Server đang bảo trì: {maintenance_msg}")
+                
+                if res.status_code != 200:
+                    raise Exception(f"HTTP {res.status_code}: {json.dumps(resp_data, ensure_ascii=False)[:200]}")
+                
+                choices = resp_data.get('choices')
+                if not choices:
+                    raise Exception(f"API trả về không có 'choices': {json.dumps(resp_data, ensure_ascii=False)[:300]}")
+                
+                content = choices[0]['message']['content']
+                log_cb(f"[{voice_name}] ✅ [{provider_name}] Model: {provider['model']} - API call thành công!")
+                return content
+                
+            except Exception as e:
+                error_msg = str(e)
+                last_error = error_msg
+                
+                # Nếu là lỗi bảo trì hoặc lỗi server, chuyển provider ngay
+                is_server_error = ('500' in error_msg or 'bảo trì' in error_msg.lower() or 
+                                  'maintenance' in error_msg.lower() or 'HTML' in error_msg)
+                
+                if is_server_error and provider_idx < len(providers) - 1:
+                    log_cb(f"[{voice_name}] ⚠️ [{provider_name}] Lỗi server: {error_msg[:150]}")
+                    log_cb(f"[{voice_name}] 🔄 Chuyển sang provider tiếp theo...")
+                    break  # Thoát vòng retry, chuyển sang provider khác
+                
+                if attempt == 2:
+                    # Hết số lần retry cho provider này
+                    if provider_idx < len(providers) - 1:
+                        log_cb(f"[{voice_name}] ⚠️ [{provider_name}] Thất bại sau 3 lần thử: {error_msg[:150]}")
+                        log_cb(f"[{voice_name}] 🔄 Chuyển sang provider tiếp theo...")
+                        break  # Chuyển sang provider khác
+                    else:
+                        # Đã hết providers
+                        raise Exception(f"Tất cả providers đều thất bại. Lỗi cuối: {error_msg}")
+                
+                log_cb(f"[{voice_name}] ⚠️ [{provider_name}] Thất bại (Lần {attempt+1}/3): {error_msg[:150]}")
+    
+    # Nếu chạy đến đây là đã thử hết providers
+    raise Exception(f"Tất cả AI providers đều thất bại. Lỗi cuối: {last_error}")
 
 def _normalize_text(text):
     return re.sub(r'\s+', ' ', str(text or '')).strip()
@@ -265,11 +441,8 @@ def get_director_timeline(voice_text, broll_text, config, log_cb, voice_name):
         json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
         return json.loads(json_str)
 
-    url_kie = "https://api.kie.ai/gemini-2.5-flash/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {config.get('kie_key')}", "Content-Type": "application/json"}
-
     # =========================================================
-    # VÒNG 1: TRỢ LÝ AI (CÓ CƠ CHẾ THỬ LẠI 3 LẦN)
+    # VÒNG 1: TRỢ LÝ AI (CÓ CƠ CHẾ AUTO-FALLBACK kie.ai → openrouter.ai)
     # =========================================================
     log_cb(f"[{voice_name}] Đạo diễn AI Vòng 1: Đang lọc rổ video ứng viên...")
     
@@ -285,25 +458,23 @@ VÒNG 1 - TÌM KIẾM ỨNG VIÊN:
 3. Ưu tiên nhặt những video có "Đã dùng: 0 lần" hoặc số lần dùng thấp.
 4. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
 [ {{"start": 0.0, "end": 2.5, "text": "...", "candidates": ["vid1.mp4", "vid2.mp4"]}} ]"""
-            
-    payload_1 = {"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": prompt_1}], "temperature": 0.5}
     
     raw_timeline = []
-    for attempt in range(3): # Vòng lặp tái sinh
-        try:
-            time.sleep(2)
-            res_1 = requests.post(url_kie, headers=headers, json=payload_1, timeout=180)
-            if res_1.status_code != 200: raise Exception(f"Lỗi API Vòng 1: {res_1.text}")
-            
-            raw_text_1 = res_1.json()["choices"][0]["message"]["content"]
-            raw_timeline = extract_json_array(raw_text_1)
-            break # Nếu thành công thì thoát vòng lặp ngay
-        except Exception as e:
-            if attempt == 2: raise Exception(f"Lỗi Vòng 1 (Đã thử 3 lần vẫn hỏng JSON): {str(e)}")
-            log_cb(f"[{voice_name}] ⚠️ Vòng 1 AI viết sai chính tả JSON, đang ép AI viết lại (Lần {attempt+2}/3)...")
+    try:
+        raw_text_1 = _call_ai_api_with_fallback(
+            model="gemini-2.5-flash",
+            messages=[{"role": "user", "content": prompt_1}],
+            temperature=0.5,
+            config=config,
+            log_cb=log_cb,
+            voice_name=voice_name
+        )
+        raw_timeline = extract_json_array(raw_text_1)
+    except Exception as e:
+        raise Exception(f"Lỗi Vòng 1: {str(e)}")
 
     # =========================================================
-    # VÒNG 2: TỔNG ĐẠO DIỄN AI (CÓ CƠ CHẾ THỬ LẠI 3 LẦN)
+    # VÒNG 2: TỔNG ĐẠO DIỄN AI (CÓ AUTO-FALLBACK kie.ai → openrouter.ai)
     # =========================================================
     log_cb(f"[{voice_name}] Đạo diễn AI Vòng 2: Đo đạc thời lượng & Ghép chuỗi cảnh...")
     
@@ -325,21 +496,19 @@ VÒNG 2 - CHỐT HẠ CHUỖI VIDEO:
 4. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
 [ {{"start": 0.0, "end": 4.5, "text": "...", "video_files": ["vid_1.mp4", "vid_2.mp4"]}} ]"""
 
-    payload_2 = {"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": prompt_2}], "temperature": 0.2}
-    
     final_timeline = []
-    for attempt in range(3): # Vòng lặp tái sinh
-        try:
-            time.sleep(2)
-            res_2 = requests.post(url_kie, headers=headers, json=payload_2, timeout=180)
-            if res_2.status_code != 200: raise Exception(f"Lỗi API Vòng 2: {res_2.text}")
-            
-            raw_text_2 = res_2.json()["choices"][0]["message"]["content"]
-            final_timeline = extract_json_array(raw_text_2)
-            break # Thành công thì thoát
-        except Exception as e:
-            if attempt == 2: raise Exception(f"Lỗi Vòng 2 (Đã thử 3 lần vẫn hỏng JSON): {str(e)}")
-            log_cb(f"[{voice_name}] ⚠️ Vòng 2 AI viết sai chính tả JSON, đang ép AI viết lại (Lần {attempt+2}/3)...")
+    try:
+        raw_text_2 = _call_ai_api_with_fallback(
+            model="gemini-2.5-flash",
+            messages=[{"role": "user", "content": prompt_2}],
+            temperature=0.2,
+            config=config,
+            log_cb=log_cb,
+            voice_name=voice_name
+        )
+        final_timeline = extract_json_array(raw_text_2)
+    except Exception as e:
+        raise Exception(f"Lỗi Vòng 2: {str(e)}")
 
     # =========================================================
     # KIỂM TRA BẢO HIỂM LẦN CUỐI (SAFETY NET)
@@ -405,7 +574,40 @@ def optimize_voice_timeline_by_ai(raw_voice_text, config, log_cb, voice_name):
     import requests
     import json
     import re
-    
+    import os
+    import hashlib
+
+    # --- Cache Vòng 0 (tránh gọi API lại cho cùng một đoạn voice) ---
+    def _v0_cache_path():
+        base = config.get('app_base_path', '')
+        return os.path.join(base, 'Workspace_Data', 'v0_cache.json') if base else ''
+
+    def _load_v0_cache():
+        p = _v0_cache_path()
+        if p and os.path.exists(p):
+            try:
+                with open(p, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_v0_cache(cache):
+        p = _v0_cache_path()
+        if p:
+            try:
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, 'w', encoding='utf-8') as f:
+                    json.dump(cache, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+    cache_key = hashlib.md5(raw_voice_text.strip().encode('utf-8')).hexdigest()
+    _v0_cache = _load_v0_cache()
+    if cache_key in _v0_cache:
+        log_cb(f"[{voice_name}] ✅ Vòng 0: Đã có cache, bỏ qua API tiết kiệm credit.")
+        return _v0_cache[cache_key]
+
     # Hàm bóc vỏ JSON (Tái sử dụng lại cho chắc cú)
     def extract_json_array(text):
         json_str = ""
@@ -439,26 +641,33 @@ NHIỆM VỤ CỦA BẠN:
 6. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
 [ {{"start": 0.0, "end": 4.5, "text": "Nội dung câu đã được ghép mượt mà..."}}, ... ]"""
 
-    payload_0 = {"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": prompt_0}], "temperature": 0.2}
-    url_kie = "https://api.kie.ai/gemini-2.5-flash/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {config.get('kie_key')}", "Content-Type": "application/json"}
+    # Kiểm tra xem có API key nào không
+    kie_key = str(config.get('kie_key') or '').strip()
+    openrouter_key = str(config.get('openrouter_key') or '').strip()
+    
+    if (not kie_key or kie_key.lower() == 'dummy') and (not openrouter_key or openrouter_key.lower() == 'dummy'):
+        log_cb(f"[{voice_name}] ⚠️ Chưa cấu hình API key, bỏ qua Vòng 0.")
+        return raw_voice_text
 
     optimized_text = ""
-    for attempt in range(3):
-        try:
-            time.sleep(1)
-            res = requests.post(url_kie, headers=headers, json=payload_0, timeout=180)
-            if res.status_code != 200: raise Exception(f"Lỗi API Vòng 0: {res.text}")
-            
-            raw_out = res.json()["choices"][0]["message"]["content"]
-            final_json = extract_json_array(raw_out)
-            final_json = _merge_related_short_segments(final_json, target_min=4.0, target_max=6.0)
-            optimized_text = _format_timeline_text(final_json)
-            break
-        except Exception as e:
-            if attempt == 2:
-                log_cb(f"[{voice_name}] ⚠️ Vòng 0 thất bại. Bỏ qua và dùng kịch bản gốc.")
-                return raw_voice_text # Lỗi thì trả về kịch bản gốc, không làm gián đoạn
-            log_cb(f"[{voice_name}] ⚠️ Vòng 0 AI gom câu bị vấp, đang thử lại (Lần {attempt+2}/3)...")
+    try:
+        raw_out = _call_ai_api_with_fallback(
+            model="gemini-2.5-flash",
+            messages=[{"role": "user", "content": prompt_0}],
+            temperature=0.2,
+            config=config,
+            log_cb=log_cb,
+            voice_name=voice_name
+        )
+        final_json = extract_json_array(raw_out)
+        final_json = _merge_related_short_segments(final_json, target_min=4.0, target_max=6.0)
+        optimized_text = _format_timeline_text(final_json)
+        # Lưu cache để lần sau bỏ qua API
+        _v0_cache[cache_key] = optimized_text
+        _save_v0_cache(_v0_cache)
+    except Exception as e:
+        error_msg = str(e)
+        log_cb(f"[{voice_name}] ⚠️ Vòng 0 thất bại: {error_msg[:150]}. Bỏ qua và dùng kịch bản gốc.")
+        return raw_voice_text # Lỗi thì trả về kịch bản gốc, không làm gián đoạn
 
     return optimized_text if optimized_text else raw_voice_text

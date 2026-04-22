@@ -29,6 +29,9 @@ wheels/
 # Workspace_Data chứa projects, voices, videos
 Workspace_Data/
 
+# Session secret key (tự generate, không commit)
+.session_secret
+
 # ================ MEDIA FILES ================
 *.mp4
 *.mov

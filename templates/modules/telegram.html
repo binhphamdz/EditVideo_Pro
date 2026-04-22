@@ -1,0 +1,51 @@
+<section id="tab-telegram" class="tab-panel">
+    <div class="card">
+        <h3>🤖 Bot Telegram</h3>
+        <div class="section-sub">Cấu hình token bot điều khiển từ xa, xem nhanh bộ lệnh đang dùng và theo dõi thống kê kho video theo workspace hiện tại.</div>
+
+        <div class="system-grid">
+            <div class="card" style="box-shadow:none;">
+                <h3>🔑 Kết nối bot</h3>
+                <div class="control-grid">
+                    <div>
+                        <label for="telegramBotToken">Mã token BotFather</label>
+                        <input id="telegramBotToken" type="password" placeholder="Dán token Telegram bot vào đây" />
+                        <div class="muted" id="telegramTokenMasked" style="margin-top:6px;font-size:12px;">Chưa có token.</div>
+                    </div>
+                    <div>
+                        <label>&nbsp;</label>
+                        <div class="toolbar-2">
+                            <button onclick="toggleTelegramTokenVisibility()" id="telegramToggleBtn">👁️ Hiện token</button>
+                            <button class="primary" onclick="saveTelegramBotConfig()">💾 Lưu token</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="telegramStatusBox" class="scene-empty" style="margin-top:12px;">Chưa nạp trạng thái bot Telegram.</div>
+            </div>
+
+            <div class="card" style="box-shadow:none;">
+                <h3>📊 Thống kê nhanh</h3>
+                <div class="system-status-grid">
+                    <div class="system-kpi"><span class="muted">Workspace</span><strong id="telegramProfileName">-</strong></div>
+                    <div class="system-kpi"><span class="muted">Tổng video</span><strong id="telegramStatTotal">0</strong></div>
+                    <div class="system-kpi"><span class="muted">Tạo hôm nay</span><strong id="telegramStatToday">0</strong></div>
+                    <div class="system-kpi"><span class="muted">Chờ chuyển</span><strong id="telegramStatPending">0</strong></div>
+                </div>
+                <div class="scene-empty" id="telegramNote" style="margin-top:12px;">Đây là khu quản lý cấu hình Telegram trên web.</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+        <h3>📖 Hướng dẫn tạo bot</h3>
+        <ol id="telegramGuideList" style="margin:0;padding-left:18px;"></ol>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+        <h3>🧭 Bộ lệnh hiện có</h3>
+        <table>
+            <thead><tr><th>Lệnh</th><th>Mô tả</th></tr></thead>
+            <tbody id="telegramCommandTable"></tbody>
+        </table>
+    </div>
+</section>
